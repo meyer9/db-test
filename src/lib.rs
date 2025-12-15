@@ -3,16 +3,50 @@
 //! This crate provides utilities to benchmark different database backends
 //! for the revm EVM implementation, focusing on ETH transfer transactions
 //! with signature verification.
+//!
+//! # Architecture
+//!
+//! The framework is organized around three main concepts:
+//!
+//! - **Workload**: A pre-generated set of signed transactions and accounts
+//! - **Executor**: A strategy for executing transactions (sequential, parallel, etc.)
+//! - **Database**: The underlying storage backend (CacheDB, custom implementations)
+//!
+//! # Quick Start
+//!
+//! ```
+//! use db_test::{Executor, SequentialExecutor, Workload, WorkloadConfig};
+//!
+//! // Configure the workload
+//! let config = WorkloadConfig {
+//!     num_accounts: 100,
+//!     num_transactions: 50,
+//!     conflict_factor: 0.0,
+//!     seed: 42,
+//!     chain_id: 1,
+//! };
+//!
+//! // Generate workload (signs all transactions upfront)
+//! let workload = Workload::generate(config);
+//! let db = workload.create_db();
+//!
+//! // Execute with signature verification
+//! let executor = SequentialExecutor::new(true);
+//! let (final_db, result) = executor.execute(db, &workload);
+//!
+//! println!("Successful: {}", result.successful);
+//! ```
+
+pub mod executor;
+
+pub use executor::{ExecutionResult, Executor, SequentialExecutor};
 
 use alloy_primitives::{keccak256, Address, Signature, B256, U256};
 use k256::ecdsa::{SigningKey, VerifyingKey};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use revm::{
-    context::TxEnv,
     database::{CacheDB, EmptyDB},
-    primitives::TxKind,
     state::AccountInfo,
-    Context, ExecuteCommitEvm, MainBuilder, MainContext,
 };
 use std::collections::HashMap;
 
@@ -87,7 +121,7 @@ pub struct SignedTransaction {
 
 impl SignedTransaction {
     /// Creates a new signed transaction.
-    /// The signature is created over a simplified hash of (from, to, value, nonce).
+    /// The signature is created over a simplified hash of (from, to, value, nonce, chain_id).
     pub fn new(
         account: &Account,
         to: Address,
@@ -197,7 +231,6 @@ impl Workload {
             .map(|i| Account::from_seed(config.seed.wrapping_add(i as u64)))
             .collect();
 
-
         // Track nonces per account for proper transaction sequencing.
         let mut nonces: HashMap<usize, u64> = HashMap::new();
 
@@ -270,219 +303,6 @@ impl Workload {
 }
 
 // ============================================================================
-// Execution Results
-// ============================================================================
-
-/// Result of executing a workload.
-#[derive(Debug, Clone, Default)]
-pub struct ExecutionResult {
-    /// Number of successfully executed transactions.
-    pub successful: usize,
-    /// Number of failed transactions (reverted or validation error).
-    pub failed: usize,
-}
-
-impl ExecutionResult {
-    /// Creates a new execution result.
-    pub fn new(successful: usize, failed: usize) -> Self {
-        Self { successful, failed }
-    }
-
-    /// Total number of transactions processed.
-    pub fn total(&self) -> usize {
-        self.successful + self.failed
-    }
-}
-
-// ============================================================================
-// Executor Trait & Implementations
-// ============================================================================
-
-/// Trait for different transaction execution strategies.
-///
-/// This allows benchmarking different approaches to executing transactions,
-/// such as sequential execution, parallel execution, or optimistic execution.
-pub trait Executor {
-    /// The database type this executor operates on.
-    type Database: revm::Database + revm::DatabaseCommit;
-
-    /// Executes the workload on the given database.
-    ///
-    /// # Arguments
-    /// * `db` - The database to execute transactions on.
-    /// * `workload` - The workload containing signed transactions to execute.
-    ///
-    /// # Returns
-    /// A tuple of (final database state, execution result).
-    fn execute(
-        &self,
-        db: Self::Database,
-        workload: &Workload,
-    ) -> (Self::Database, ExecutionResult);
-}
-
-/// Sequential executor that processes transactions one at a time.
-///
-/// This is the baseline executor that processes transactions in order,
-/// verifying signatures and executing each transaction before moving to the next.
-#[derive(Debug, Clone, Default)]
-pub struct SequentialExecutor {
-    /// Whether to verify signatures during execution.
-    pub verify_signatures: bool,
-}
-
-impl SequentialExecutor {
-    /// Creates a new sequential executor.
-    pub fn new(verify_signatures: bool) -> Self {
-        Self { verify_signatures }
-    }
-}
-
-impl Executor for SequentialExecutor {
-    type Database = CacheDB<EmptyDB>;
-
-    fn execute(
-        &self,
-        db: Self::Database,
-        workload: &Workload,
-    ) -> (Self::Database, ExecutionResult) {
-        let mut successful = 0;
-        let mut failed = 0;
-
-        // Create the EVM context.
-        let mut evm = Context::mainnet().with_db(db).build_mainnet();
-
-        for tx in &workload.transactions {
-            // Verify signature if enabled.
-            if self.verify_signatures {
-                let recovered = match tx.recover_signer() {
-                    Some(addr) => addr,
-                    None => {
-                        failed += 1;
-                        continue;
-                    }
-                };
-
-                if recovered != tx.from {
-                    failed += 1;
-                    continue;
-                }
-            }
-
-            // Build the transaction environment.
-            let tx_env = TxEnv {
-                caller: tx.from,
-                kind: TxKind::Call(tx.to),
-                value: tx.value,
-                gas_limit: 21_000,
-                gas_price: 1,
-                nonce: tx.nonce,
-                chain_id: Some(workload.config.chain_id),
-                ..Default::default()
-            };
-
-            // Execute and commit.
-            match evm.transact_commit(tx_env) {
-                Ok(result) => {
-                    if result.is_success() {
-                        successful += 1;
-                    } else {
-                        failed += 1;
-                    }
-                }
-                Err(_) => {
-                    failed += 1;
-                }
-            }
-        }
-
-        (
-            evm.ctx.journaled_state.database,
-            ExecutionResult::new(successful, failed),
-        )
-    }
-}
-
-// ============================================================================
-// Legacy API (for backwards compatibility)
-// ============================================================================
-
-/// Configuration for transaction generation (legacy).
-#[deprecated(since = "0.2.0", note = "Use WorkloadConfig instead")]
-pub type TxGenConfig = WorkloadConfig;
-
-/// A simple ETH transfer transaction (legacy, unsigned).
-#[derive(Debug, Clone)]
-pub struct Transfer {
-    pub from: Address,
-    pub to: Address,
-    pub value: U256,
-}
-
-/// Creates a CacheDB with pre-funded accounts at deterministic addresses.
-pub fn create_in_memory_db(num_accounts: usize) -> CacheDB<EmptyDB> {
-    let config = WorkloadConfig {
-        num_accounts,
-        ..Default::default()
-    };
-    Workload::generate(config).create_db()
-}
-
-/// Generates unsigned transfer transactions (legacy).
-#[deprecated(since = "0.2.0", note = "Use Workload::generate instead")]
-pub fn generate_transfers(config: &WorkloadConfig) -> Vec<Transfer> {
-    let workload = Workload::generate(config.clone());
-    workload
-        .transactions
-        .iter()
-        .map(|tx| Transfer {
-            from: tx.from,
-            to: tx.to,
-            value: tx.value,
-        })
-        .collect()
-}
-
-/// Executes unsigned transfers (legacy).
-#[deprecated(since = "0.2.0", note = "Use SequentialExecutor instead")]
-pub fn execute_transfers<DB>(db: DB, transfers: &[Transfer]) -> (DB, usize)
-where
-    DB: revm::Database + revm::DatabaseCommit,
-    <DB as revm::Database>::Error: std::fmt::Debug,
-{
-    let mut nonces: HashMap<Address, u64> = HashMap::new();
-    let mut successful = 0;
-
-    let mut evm = Context::mainnet().with_db(db).build_mainnet();
-
-    for transfer in transfers {
-        let nonce = nonces.entry(transfer.from).or_insert(0);
-
-        let tx = TxEnv {
-            caller: transfer.from,
-            kind: TxKind::Call(transfer.to),
-            value: transfer.value,
-            gas_limit: 21_000,
-            gas_price: 1,
-            nonce: *nonce,
-            ..Default::default()
-        };
-
-        match evm.transact_commit(tx) {
-            Ok(result) => {
-                *nonce += 1;
-                if result.is_success() {
-                    successful += 1;
-                }
-            }
-            Err(_) => {}
-        }
-    }
-
-    (evm.ctx.journaled_state.database, successful)
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
@@ -537,45 +357,5 @@ mod tests {
         for tx in &workload.transactions {
             assert!(tx.verify(), "Transaction signature should be valid");
         }
-    }
-
-    #[test]
-    fn test_sequential_executor() {
-        let config = WorkloadConfig {
-            num_accounts: 10,
-            num_transactions: 5,
-            conflict_factor: 0.0,
-            seed: 42,
-            chain_id: 1,
-        };
-
-        let workload = Workload::generate(config);
-        let db = workload.create_db();
-        
-        let executor = SequentialExecutor::new(true);
-        let (_, result) = executor.execute(db, &workload);
-
-        assert_eq!(result.successful, 5);
-        assert_eq!(result.failed, 0);
-    }
-
-    #[test]
-    fn test_sequential_executor_without_sig_verification() {
-        let config = WorkloadConfig {
-            num_accounts: 10,
-            num_transactions: 5,
-            conflict_factor: 0.0,
-            seed: 42,
-            chain_id: 1,
-        };
-
-        let workload = Workload::generate(config);
-        let db = workload.create_db();
-        
-        let executor = SequentialExecutor::new(false);
-        let (_, result) = executor.execute(db, &workload);
-
-        assert_eq!(result.successful, 5);
-        assert_eq!(result.failed, 0);
     }
 }
