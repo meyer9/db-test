@@ -53,7 +53,8 @@ impl DupSort for HashedStoragesTable {
 
 /// MDBX database wrapper for EVM execution.
 pub struct MdbxDatabase {
-    env: DatabaseEnv,
+    /// The MDBX database environment.
+    pub(crate) env: DatabaseEnv,
 }
 
 impl MdbxDatabase {
@@ -279,6 +280,7 @@ mod tests {
             conflict_factor: 0.0,
             seed: 42,
             chain_id: 1,
+            transactions_per_block: 5,
         };
 
         let workload = Workload::generate(config);

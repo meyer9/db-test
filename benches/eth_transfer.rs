@@ -18,6 +18,7 @@ fn bench_conflict_levels(c: &mut Criterion) {
             conflict_factor,
             seed: 42,
             chain_id: 1,
+            transactions_per_block: 1000, // Single block for these small benchmarks
         };
 
         // Pre-generate workload (including signing) outside the benchmark loop.
@@ -54,6 +55,7 @@ fn bench_batch_sizes(c: &mut Criterion) {
             conflict_factor: 0.0,
             seed: 42,
             chain_id: 1,
+            transactions_per_block: batch_size, // One block per batch
         };
 
         let workload = Workload::generate(config);
@@ -90,6 +92,7 @@ fn bench_account_pools(c: &mut Criterion) {
             conflict_factor: 0.0,
             seed: 42,
             chain_id: 1,
+            transactions_per_block: 1000, // Single block
         };
 
         let workload = Workload::generate(config);
@@ -122,6 +125,7 @@ fn bench_signature_verification(c: &mut Criterion) {
         conflict_factor: 0.0,
         seed: 42,
         chain_id: 1,
+        transactions_per_block: 1000, // Single block
     };
 
     let workload = Workload::generate(config);

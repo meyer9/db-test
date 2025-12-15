@@ -24,6 +24,7 @@
 //!     conflict_factor: 0.0,
 //!     seed: 42,
 //!     chain_id: 1,
+//!     transactions_per_block: 10,
 //! };
 //!
 //! // Generate workload (signs all transactions upfront)
@@ -195,16 +196,19 @@ pub struct WorkloadConfig {
     pub seed: u64,
     /// Chain ID for transaction signing.
     pub chain_id: u64,
+    /// Number of transactions per block. Transactions will be divided into blocks of this size.
+    pub transactions_per_block: usize,
 }
 
 impl Default for WorkloadConfig {
     fn default() -> Self {
         Self {
-            num_accounts: 1000,
-            num_transactions: 100,
+            num_accounts: 50_000,      // Realistic account pool size
+            num_transactions: 1_250,   // 2 blocks worth at default block size
             conflict_factor: 0.0,
             seed: 42,
             chain_id: 1,
+            transactions_per_block: 625, // Mid-range of 2k-20k (scaled down for benchmarking)
         }
     }
 }
@@ -214,8 +218,11 @@ impl Default for WorkloadConfig {
 pub struct Workload {
     /// The accounts (with signing keys) participating in this workload.
     pub accounts: Vec<Account>,
-    /// The pre-signed transactions to execute.
+    /// The pre-signed transactions to execute (flat list).
     pub transactions: Vec<SignedTransaction>,
+    /// Transactions organized into blocks (only populated if transactions_per_block is set).
+    /// Each inner vector represents a block of transactions.
+    pub blocks: Vec<Vec<SignedTransaction>>,
     /// The configuration used to generate this workload.
     pub config: WorkloadConfig,
 }
@@ -276,9 +283,16 @@ impl Workload {
             })
             .collect();
 
+        // Divide transactions into blocks.
+        let blocks: Vec<Vec<SignedTransaction>> = transactions
+            .chunks(config.transactions_per_block)
+            .map(|chunk| chunk.to_vec())
+            .collect();
+
         Self {
             accounts,
             transactions,
+            blocks,
             config,
         }
     }
@@ -299,6 +313,16 @@ impl Workload {
         }
 
         db
+    }
+
+    /// Returns the number of blocks in this workload.
+    pub fn num_blocks(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Returns the number of transactions per block (from config).
+    pub fn transactions_per_block(&self) -> usize {
+        self.config.transactions_per_block
     }
 }
 
@@ -346,12 +370,20 @@ mod tests {
             conflict_factor: 0.0,
             seed: 123,
             chain_id: 1,
+            transactions_per_block: 5,
         };
 
         let workload = Workload::generate(config);
         
         assert_eq!(workload.accounts.len(), 10);
         assert_eq!(workload.transactions.len(), 20);
+        assert_eq!(workload.blocks.len(), 4); // 20 txs / 5 per block = 4 blocks
+        assert_eq!(workload.num_blocks(), 4);
+
+        // Verify blocks are properly sized
+        for block in &workload.blocks {
+            assert!(block.len() <= 5);
+        }
 
         // All transactions should have valid signatures.
         for tx in &workload.transactions {

@@ -8,10 +8,16 @@ mod sequential;
 #[cfg(feature = "mdbx")]
 mod mdbx;
 
+#[cfg(feature = "mdbx")]
+mod mdbx_batched;
+
 pub use sequential::SequentialExecutor;
 
 #[cfg(feature = "mdbx")]
 pub use mdbx::{MdbxDatabase, MdbxSequentialExecutor};
+
+#[cfg(feature = "mdbx")]
+pub use mdbx_batched::{BlockResult, MdbxBatchedExecutor, MultiBlockResult};
 
 use crate::Workload;
 

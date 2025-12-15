@@ -4,7 +4,7 @@ use db_test::{Executor, SequentialExecutor, Workload, WorkloadConfig};
 use std::time::Instant;
 
 #[cfg(feature = "mdbx")]
-use db_test::executor::MdbxSequentialExecutor;
+use db_test::executor::{MdbxBatchedExecutor, MdbxSequentialExecutor};
 #[cfg(feature = "mdbx")]
 use tempfile::tempdir;
 
@@ -78,12 +78,16 @@ fn main() {
         },
     ];
 
-    let num_accounts = 1000;
-    let num_transactions = 1000;
+    // Realistic blockchain parameters (scaled down for faster benchmarks)
+    let num_accounts = 50_000;           // Large account pool
+    let num_transactions = 2_500;        // 4 blocks at 625 tx/block
+    let transactions_per_block = 625;    // Mid-range of 2k-20k typical in real blockchains (scaled)
 
     println!("Benchmark Configuration:");
     println!("  • Accounts: {}", num_accounts);
     println!("  • Transactions per run: {}", num_transactions);
+    println!("  • Transactions per block: {}", transactions_per_block);
+    println!("  • Number of blocks: {}", num_transactions / transactions_per_block);
     println!("  • Signature verification: enabled");
     println!();
 
@@ -103,6 +107,7 @@ fn main() {
             conflict_factor: config.conflict_factor,
             seed: 42,
             chain_id: 1,
+            transactions_per_block,
         };
 
         let workload = Workload::generate(workload_config);
@@ -145,6 +150,7 @@ fn main() {
                 conflict_factor: config.conflict_factor,
                 seed: 42,
                 chain_id: 1,
+                transactions_per_block,
             };
 
             let workload = Workload::generate(workload_config);
@@ -166,6 +172,52 @@ fn main() {
                 preserves_order: executor.preserves_order(),
                 successful: result.successful,
                 failed: result.failed,
+                duration_ms: elapsed.as_secs_f64() * 1000.0,
+                throughput_tps: num_transactions as f64 / elapsed.as_secs_f64(),
+            };
+
+            bench_result.print();
+            all_results.push(bench_result);
+        }
+
+        println!();
+
+        // Run benchmarks for MDBX batched executor
+        println!("════════════════════════════════════════════════════════════════════════════════════════════════════════════");
+        println!("  MDBX Batched Executor (Block-level caching and commit)");
+        println!("════════════════════════════════════════════════════════════════════════════════════════════════════════════");
+        println!();
+        BenchmarkResult::print_header();
+
+        for config in &configs {
+            let workload_config = WorkloadConfig {
+                num_accounts,
+                num_transactions,
+                conflict_factor: config.conflict_factor,
+                seed: 42,
+                chain_id: 1,
+                transactions_per_block,
+            };
+
+            let workload = Workload::generate(workload_config);
+
+            // Create temporary directory for each run
+            let dir = tempdir().expect("Failed to create temp directory");
+            let executor = MdbxBatchedExecutor::new(dir.path(), true)
+                .expect("Failed to create MDBX batched executor");
+
+            let start = Instant::now();
+            let (result, _) = executor
+                .execute_workload(&workload)
+                .expect("Execution failed");
+            let elapsed = start.elapsed();
+
+            let bench_result = BenchmarkResult {
+                config_name: config.name,
+                executor_name: executor.name(),
+                preserves_order: executor.preserves_order(),
+                successful: result.total_successful,
+                failed: result.total_failed,
                 duration_ms: elapsed.as_secs_f64() * 1000.0,
                 throughput_tps: num_transactions as f64 / elapsed.as_secs_f64(),
             };

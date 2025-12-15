@@ -166,6 +166,7 @@ mod tests {
             conflict_factor: 0.0,
             seed: 42,
             chain_id: 1,
+            transactions_per_block: 5,
         };
 
         let workload = Workload::generate(config);
@@ -186,6 +187,7 @@ mod tests {
             conflict_factor: 0.0,
             seed: 42,
             chain_id: 1,
+            transactions_per_block: 5,
         };
 
         let workload = Workload::generate(config);
@@ -206,6 +208,7 @@ mod tests {
             conflict_factor: 0.0,
             seed: 42,
             chain_id: 1,
+            transactions_per_block: 5,
         };
 
         let workload = Workload::generate(config);
