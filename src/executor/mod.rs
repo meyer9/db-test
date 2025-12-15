@@ -14,6 +14,9 @@ mod mdbx_batched;
 #[cfg(feature = "fdb")]
 mod fdb;
 
+#[cfg(feature = "block-stm")]
+mod block_stm;
+
 pub use sequential::SequentialExecutor;
 
 #[cfg(feature = "mdbx")]
@@ -24,6 +27,9 @@ pub use mdbx_batched::{BlockResult, MdbxBatchedExecutor, MultiBlockResult};
 
 #[cfg(feature = "fdb")]
 pub use fdb::{FdbParallelExecutor, ParallelExecutionResult, ThreadResult};
+
+#[cfg(feature = "block-stm")]
+pub use block_stm::BlockStmExecutor;
 
 use crate::Workload;
 

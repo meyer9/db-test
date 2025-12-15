@@ -1,0 +1,30 @@
+[package]
+name = "block-stm-executor"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+# Core primitives
+alloy-primitives = { version = "1", features = ["k256"] }
+alloy-consensus = "0.14"
+
+# EVM execution
+revm = { version = "33", features = ["std"] }
+
+# Concurrency
+dashmap = "6"
+parking_lot = "0.12"
+crossbeam = "0.8"
+
+# MDBX integration (optional, for final commit)
+reth-db = { path = "../../reth/crates/storage/db", optional = true }
+reth-db-api = { path = "../../reth/crates/storage/db-api", optional = true }
+reth-libmdbx = { path = "../../reth/crates/storage/libmdbx-rs", optional = true }
+reth-primitives-traits = { path = "../../reth/crates/primitives-traits", optional = true }
+eyre = { version = "0.6", optional = true }
+tempfile = "3"
+
+[features]
+default = []
+mdbx = ["dep:reth-db", "dep:reth-db-api", "dep:reth-libmdbx", "dep:reth-primitives-traits", "dep:eyre"]

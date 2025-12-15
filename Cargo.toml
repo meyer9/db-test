@@ -8,6 +8,7 @@ license = "MIT"
 default = []
 mdbx = ["dep:reth-db", "dep:reth-db-api", "dep:reth-libmdbx", "dep:reth-primitives-traits", "dep:eyre"]
 fdb = ["dep:foundationdb", "dep:tokio"]
+block-stm = ["dep:block-stm-executor"]
 
 [dependencies]
 revm = { version = "33", features = ["std"] }
@@ -27,6 +28,9 @@ tempfile = "3"
 # FoundationDB support (optional)
 foundationdb = { version = "0.10", features = ["embedded-fdb-include", "fdb-7_4"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"], optional = true }
+
+# Block-STM parallel executor (optional)
+block-stm-executor = { path = "block-stm-executor", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

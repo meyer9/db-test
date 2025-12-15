@@ -244,6 +244,66 @@ fn main() {
         println!();
     }
 
+    // Run benchmarks for Block-STM parallel executor if feature is enabled
+    #[cfg(feature = "block-stm")]
+    {
+        println!("════════════════════════════════════════════════════════════════════════════════════════════════════════════");
+        println!("  Block-STM Parallel Executor (Optimistic concurrency with strict ordering)");
+        println!("════════════════════════════════════════════════════════════════════════════════════════════════════════════");
+        println!();
+
+        // Test with different thread counts
+        let thread_counts = [1, 2, 4, 8];
+
+        for &num_threads in &thread_counts {
+            println!("--- {} threads ---", num_threads);
+            BenchmarkResult::print_header();
+
+            for config in &configs {
+                let workload_config = WorkloadConfig {
+                    num_accounts,
+                    num_transactions,
+                    transactions_per_block,
+                    conflict_factor: config.conflict_factor,
+                    seed: 42,
+                    chain_id: 1,
+                };
+
+                let workload = Workload::generate(workload_config);
+                let db = workload.create_db();
+                
+                let executor = db_test::BlockStmExecutor::new(num_threads, true);
+
+                let start = Instant::now();
+                let (_, result) = executor.execute(db, &workload);
+                let elapsed = start.elapsed();
+
+                let bench_result = BenchmarkResult {
+                    config_name: config.name,
+                    executor_name: format!("block_stm_{}t", num_threads).leak(),
+                    preserves_order: executor.preserves_order(),
+                    successful: result.successful,
+                    failed: result.failed,
+                    duration_ms: elapsed.as_secs_f64() * 1000.0,
+                    throughput_tps: num_transactions as f64 / elapsed.as_secs_f64(),
+                };
+
+                bench_result.print();
+                all_results.push(bench_result);
+            }
+
+            println!();
+        }
+    }
+
+    #[cfg(not(feature = "block-stm"))]
+    {
+        println!("════════════════════════════════════════════════════════════════════════════════════════════════════════════");
+        println!("  Block-STM executor not available (enable with --features block-stm)");
+        println!("════════════════════════════════════════════════════════════════════════════════════════════════════════════");
+        println!();
+    }
+
     // Run benchmarks for FoundationDB executor if feature is enabled
     #[cfg(feature = "fdb")]
     {

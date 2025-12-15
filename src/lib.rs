@@ -41,6 +41,12 @@
 pub mod executor;
 
 pub use executor::{ExecutionResult, Executor, OrderingMode, SequentialExecutor};
+#[cfg(feature = "mdbx")]
+pub use executor::{MdbxBatchedExecutor, MdbxDatabase, MdbxSequentialExecutor};
+#[cfg(feature = "fdb")]
+pub use executor::FdbParallelExecutor;
+#[cfg(feature = "block-stm")]
+pub use executor::BlockStmExecutor;
 
 use alloy_primitives::{keccak256, Address, Signature, B256, U256};
 use k256::ecdsa::{SigningKey, VerifyingKey};
