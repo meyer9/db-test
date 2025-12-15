@@ -24,11 +24,11 @@ fn main() {
 
     // Test with signature verification.
     println!("--- With Signature Verification ---");
-    let executor_with_sig = SequentialExecutor::new(true);
+    let executor_with_sig = SequentialExecutor::with_verification(true);
     run_benchmarks(&configs, num_accounts, num_transactions, &executor_with_sig);
 
     println!("\n--- Without Signature Verification ---");
-    let executor_no_sig = SequentialExecutor::new(false);
+    let executor_no_sig = SequentialExecutor::with_verification(false);
     run_benchmarks(&configs, num_accounts, num_transactions, &executor_no_sig);
 }
 

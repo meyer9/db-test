@@ -31,7 +31,7 @@
 //! let db = workload.create_db();
 //!
 //! // Execute with signature verification
-//! let executor = SequentialExecutor::new(true);
+//! let executor = SequentialExecutor::with_verification(true);
 //! let (final_db, result) = executor.execute(db, &workload);
 //!
 //! println!("Successful: {}", result.successful);
@@ -39,7 +39,7 @@
 
 pub mod executor;
 
-pub use executor::{ExecutionResult, Executor, SequentialExecutor};
+pub use executor::{ExecutionResult, Executor, OrderingMode, SequentialExecutor};
 
 use alloy_primitives::{keccak256, Address, Signature, B256, U256};
 use k256::ecdsa::{SigningKey, VerifyingKey};

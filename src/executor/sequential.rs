@@ -10,7 +10,7 @@ use revm::{
     Context, ExecuteCommitEvm, MainBuilder, MainContext,
 };
 
-use super::{ExecutionResult, Executor};
+use super::{ExecutionResult, Executor, OrderingMode};
 use crate::Workload;
 
 /// Sequential executor that processes transactions one at a time.
@@ -18,24 +18,34 @@ use crate::Workload;
 /// This is the baseline executor that processes transactions in order,
 /// verifying signatures and executing each transaction before moving to the next.
 ///
+/// # Ordering Behavior
+///
+/// The sequential executor always maintains strict ordering regardless of the
+/// `ordering` configuration, since it processes transactions one at a time.
+/// The `ordering` field is provided for consistency with other executors.
+///
 /// # Example
 ///
 /// ```
 /// use db_test::{Executor, SequentialExecutor, Workload, WorkloadConfig};
+/// use db_test::executor::OrderingMode;
 ///
 /// let config = WorkloadConfig::default();
 /// let workload = Workload::generate(config);
 /// let db = workload.create_db();
 ///
-/// let executor = SequentialExecutor::new(true); // with signature verification
+/// // With signature verification and strict ordering (default)
+/// let executor = SequentialExecutor::new(true, OrderingMode::Strict);
 /// let (final_db, result) = executor.execute(db, &workload);
 ///
 /// println!("Successful: {}, Failed: {}", result.successful, result.failed);
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SequentialExecutor {
     /// Whether to verify signatures during execution.
     pub verify_signatures: bool,
+    /// Ordering mode (ignored for sequential execution).
+    pub ordering: OrderingMode,
 }
 
 impl SequentialExecutor {
@@ -44,8 +54,27 @@ impl SequentialExecutor {
     /// # Arguments
     /// * `verify_signatures` - If true, recovers and verifies the signer address
     ///   from each transaction's signature before execution.
-    pub fn new(verify_signatures: bool) -> Self {
-        Self { verify_signatures }
+    /// * `ordering` - Ordering mode (ignored for sequential execution, as it
+    ///   naturally maintains strict ordering).
+    pub fn new(verify_signatures: bool, ordering: OrderingMode) -> Self {
+        Self {
+            verify_signatures,
+            ordering,
+        }
+    }
+
+    /// Creates a new sequential executor with default ordering (strict).
+    ///
+    /// This is a convenience constructor for the common case where you just
+    /// want to control signature verification.
+    pub fn with_verification(verify_signatures: bool) -> Self {
+        Self::new(verify_signatures, OrderingMode::default())
+    }
+}
+
+impl Default for SequentialExecutor {
+    fn default() -> Self {
+        Self::new(true, OrderingMode::default())
     }
 }
 
@@ -63,6 +92,8 @@ impl Executor for SequentialExecutor {
         // Create the EVM context with mainnet configuration.
         let mut evm = Context::mainnet().with_db(db).build_mainnet();
 
+        // Note: Sequential execution always maintains strict ordering,
+        // regardless of self.ordering configuration.
         for tx in &workload.transactions {
             // Verify signature if enabled.
             if self.verify_signatures {
@@ -132,7 +163,7 @@ mod tests {
         let workload = Workload::generate(config);
         let db = workload.create_db();
 
-        let executor = SequentialExecutor::new(true);
+        let executor = SequentialExecutor::new(true, OrderingMode::Strict);
         let (_, result) = executor.execute(db, &workload);
 
         assert_eq!(result.successful, 5);
@@ -152,12 +183,42 @@ mod tests {
         let workload = Workload::generate(config);
         let db = workload.create_db();
 
-        let executor = SequentialExecutor::new(false);
+        let executor = SequentialExecutor::new(false, OrderingMode::Loose);
         let (_, result) = executor.execute(db, &workload);
 
         assert_eq!(result.successful, 5);
         assert_eq!(result.failed, 0);
     }
+
+    #[test]
+    fn test_sequential_executor_convenience_constructor() {
+        let config = WorkloadConfig {
+            num_accounts: 10,
+            num_transactions: 5,
+            conflict_factor: 0.0,
+            seed: 42,
+            chain_id: 1,
+        };
+
+        let workload = Workload::generate(config);
+        let db = workload.create_db();
+
+        let executor = SequentialExecutor::with_verification(true);
+        let (_, result) = executor.execute(db, &workload);
+
+        assert_eq!(result.successful, 5);
+        assert_eq!(result.failed, 0);
+        assert_eq!(executor.ordering, OrderingMode::Strict);
+    }
+
+    #[test]
+    fn test_ordering_mode_methods() {
+        assert!(OrderingMode::Strict.is_strict());
+        assert!(!OrderingMode::Strict.is_loose());
+
+        assert!(!OrderingMode::Loose.is_strict());
+        assert!(OrderingMode::Loose.is_loose());
+
+        assert_eq!(OrderingMode::default(), OrderingMode::Strict);
+    }
 }
-
-

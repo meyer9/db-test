@@ -9,7 +9,7 @@ fn bench_conflict_levels(c: &mut Criterion) {
 
     let conflict_factors = [0.0, 0.25, 0.5, 0.75, 1.0];
     let num_transactions = 1000;
-    let executor = SequentialExecutor::new(true); // With signature verification
+    let executor = SequentialExecutor::with_verification(true); // With signature verification
 
     for &conflict_factor in &conflict_factors {
         let config = WorkloadConfig {
@@ -45,7 +45,7 @@ fn bench_batch_sizes(c: &mut Criterion) {
     let mut group = c.benchmark_group("eth_transfer/batch_sizes");
 
     let batch_sizes = [100, 500, 1000, 5000];
-    let executor = SequentialExecutor::new(true);
+    let executor = SequentialExecutor::with_verification(true);
 
     for &batch_size in &batch_sizes {
         let config = WorkloadConfig {
@@ -81,7 +81,7 @@ fn bench_account_pools(c: &mut Criterion) {
 
     let account_counts = [100, 1000, 10_000];
     let num_transactions = 1000;
-    let executor = SequentialExecutor::new(true);
+    let executor = SequentialExecutor::with_verification(true);
 
     for &num_accounts in &account_counts {
         let config = WorkloadConfig {
@@ -127,7 +127,7 @@ fn bench_signature_verification(c: &mut Criterion) {
     let workload = Workload::generate(config);
 
     // Without signature verification.
-    let executor_no_sig = SequentialExecutor::new(false);
+    let executor_no_sig = SequentialExecutor::with_verification(false);
     group.throughput(Throughput::Elements(num_transactions as u64));
     group.bench_with_input(
         BenchmarkId::new("sequential", "no_verification"),
@@ -142,7 +142,7 @@ fn bench_signature_verification(c: &mut Criterion) {
     );
 
     // With signature verification.
-    let executor_with_sig = SequentialExecutor::new(true);
+    let executor_with_sig = SequentialExecutor::with_verification(true);
     group.bench_with_input(
         BenchmarkId::new("sequential", "with_verification"),
         &workload,
