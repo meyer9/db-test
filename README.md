@@ -72,10 +72,13 @@ Transactions are pre-signed during workload generation. During execution:
 ## Quick Start
 
 ```bash
-# Run a quick benchmark (in-memory)
+# Run comprehensive benchmark suite (in-memory only)
 cargo run --release
 
-# Run with MDBX persistent storage
+# Run with MDBX persistent storage benchmarks included
+cargo run --release --features mdbx
+
+# Run MDBX-only example
 cargo run --example mdbx_benchmark --features mdbx --release
 
 # Run the full criterion benchmarks
@@ -83,6 +86,38 @@ cargo bench
 
 # Run tests (including MDBX if feature enabled)
 cargo test --all-features
+```
+
+### Benchmark Output
+
+The main executable runs all available executors with different conflict ratios and provides:
+- Individual benchmark results for each configuration
+- Summary statistics per executor (avg/min/max throughput)
+- Ordering information (strict vs loose)
+- Clear indication of which features are enabled
+
+Example output:
+```
+════════════════════════════════════════════════════════════════════════════════
+  In-Memory Executor (CacheDB)
+════════════════════════════════════════════════════════════════════════════════
+
+Config               | Executor             | Ordering | Successful | Failed | Time (ms) | TPS         
+No conflicts         | sequential_in_memory | strict   | 1000       | 0      | 191.53    | 5221        
+25% conflicts        | sequential_in_memory | strict   | 1000       | 0      | 191.26    | 5228        
+...
+
+  Summary Statistics
+
+sequential_in_memory:
+  • Average throughput: 5218 tx/s
+  • Min throughput: 5212 tx/s
+  • Max throughput: 5228 tx/s
+  • Preserves order: true
+
+mdbx_sequential:
+  • Average throughput: 606 tx/s
+  • Preserves order: true
 ```
 
 ## Features
