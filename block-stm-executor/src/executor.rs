@@ -3,12 +3,22 @@
 use crate::mvhashmap::{MVHashMap, ReadResult};
 use crate::scheduler::{Scheduler, Task};
 use crate::types::{AccountState, Incarnation, TxnIndex, Version};
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, Signature, B256, U256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Error type for transaction execution.
+#[derive(Debug, Clone)]
+pub enum ExecutionError {
+    /// Permanent failure - transaction is invalid (e.g., bad signature).
+    Permanent(String),
+    /// Retry needed - a dependency hasn't been resolved yet.
+    /// The transaction should be re-executed after invalidation.
+    Retry,
+}
 
 /// A simplified transaction for execution.
 ///
@@ -20,7 +30,27 @@ pub struct Transaction {
     pub to: Address,
     pub value: U256,
     pub nonce: u64,
-    pub signature_valid: bool,
+    /// The ECDSA signature for verification (done in parallel).
+    pub signature: Signature,
+    /// The hash that was signed.
+    pub tx_hash: B256,
+}
+
+impl Transaction {
+    /// Recovers the signer address from the signature.
+    /// This is the expensive cryptographic operation that should be parallelized.
+    pub fn recover_signer(&self) -> Option<Address> {
+        self.signature
+            .recover_address_from_prehash(&self.tx_hash)
+            .ok()
+    }
+
+    /// Verifies the signature matches the claimed sender.
+    pub fn verify_signature(&self) -> bool {
+        self.recover_signer()
+            .map(|addr| addr == self.from)
+            .unwrap_or(false)
+    }
 }
 
 /// Configuration for parallel execution.
@@ -123,7 +153,7 @@ impl ParallelExecutor {
 
     /// Worker thread main loop.
     fn worker_loop(
-        _worker_id: usize,
+        worker_id: usize,
         scheduler: Arc<Scheduler>,
         mv_hashmap: Arc<MVHashMap>,
         transactions: Arc<Vec<Transaction>>,
@@ -133,10 +163,15 @@ impl ParallelExecutor {
         success_count: Arc<AtomicUsize>,
         fail_count: Arc<AtomicUsize>,
     ) {
+        let mut local_executions = 0;
+        let mut wait_count = 0;
+        
         loop {
             match scheduler.next_task() {
                 Task::Execute(txn_idx, incarnation) => {
+                    local_executions += 1;
                     execution_count.fetch_add(1, Ordering::Relaxed);
+                    wait_count = 0; // Reset wait counter on successful task
                     
                     let tx = &transactions[txn_idx];
                     
@@ -158,7 +193,14 @@ impl ParallelExecutor {
                             // Notify scheduler
                             scheduler.finish_execution(txn_idx, incarnation, invalidated);
                         }
-                        Err(_reason) => {
+                        Err(ExecutionError::Retry) => {
+                            // Transaction couldn't execute due to unmet dependencies.
+                            // The reads have been recorded, so when the dependency writes,
+                            // this transaction will be invalidated and re-executed.
+                            // Mark as "executed" so it can be invalidated.
+                            scheduler.finish_execution(txn_idx, incarnation, vec![]);
+                        }
+                        Err(ExecutionError::Permanent(_reason)) => {
                             // Execution failed permanently (e.g., invalid signature)
                             fail_count.fetch_add(1, Ordering::Relaxed);
                             
@@ -166,13 +208,51 @@ impl ParallelExecutor {
                             scheduler.finish_execution(txn_idx, incarnation, vec![]);
                         }
                     }
+                    
+                    // Log progress every 1000 executions
+                    if local_executions % 1000 == 0 {
+                        let stats = scheduler.stats();
+                        let total_exec = execution_count.load(Ordering::Relaxed);
+                        eprintln!(
+                            "[Worker {}] Executed: {}, Total: {}, Pending: {}, Executing: {}, Executed: {}, Committed: {}, Incarnations: {}",
+                            worker_id,
+                            local_executions,
+                            total_exec,
+                            stats.pending,
+                            stats.executing,
+                            stats.executed,
+                            stats.committed,
+                            stats.total_incarnations
+                        );
+                    }
                 }
                 Task::Wait => {
                     // No task available, sleep briefly
+                    wait_count += 1;
+                    
+                    // Log if we're waiting too long
+                    if wait_count % 100 == 0 {
+                        let stats = scheduler.stats();
+                        eprintln!(
+                            "[Worker {}] Waiting... ({}x) - Pending: {}, Executing: {}, Executed: {}, Committed: {}",
+                            worker_id,
+                            wait_count,
+                            stats.pending,
+                            stats.executing,
+                            stats.executed,
+                            stats.committed
+                        );
+                    }
+                    
                     thread::sleep(Duration::from_micros(10));
                 }
                 Task::Done => {
                     // All done
+                    eprintln!(
+                        "[Worker {}] Done! Total executions: {}",
+                        worker_id,
+                        local_executions
+                    );
                     break;
                 }
             }
@@ -180,6 +260,11 @@ impl ParallelExecutor {
     }
 
     /// Executes a single transaction and returns read/write sets and invalidations.
+    /// 
+    /// Returns:
+    /// - Ok(...) - Transaction executed successfully
+    /// - Err(ExecutionError::Permanent) - Transaction failed permanently (bad signature)
+    /// - Err(ExecutionError::Retry) - Transaction should be retried (nonce/balance dependency)
     fn execute_transaction(
         tx: &Transaction,
         txn_idx: TxnIndex,
@@ -187,26 +272,26 @@ impl ParallelExecutor {
         mv_hashmap: &MVHashMap,
         initial_states: &HashMap<Address, AccountState>,
         verify_signatures: bool,
-    ) -> Result<(Vec<Address>, Vec<Address>, Vec<TxnIndex>), String> {
-        // Verify signature if enabled
-        if verify_signatures && !tx.signature_valid {
-            return Err("Invalid signature".to_string());
+    ) -> Result<(Vec<Address>, Vec<Address>, Vec<TxnIndex>), ExecutionError> {
+        // Verify signature if enabled - this is the expensive operation that
+        // benefits from parallelization (~50-200μs per signature recovery)
+        if verify_signatures && !tx.verify_signature() {
+            return Err(ExecutionError::Permanent("Invalid signature".to_string()));
         }
         
         // Read sender account
         let sender_state = Self::read_account(tx.from, txn_idx, mv_hashmap, initial_states);
         
-        // Validate nonce
+        // Validate nonce - if wrong, we need to retry (dependency not ready)
         if sender_state.nonce != tx.nonce {
-            return Err(format!(
-                "Nonce mismatch: expected {}, got {}",
-                sender_state.nonce, tx.nonce
-            ));
+            // This means a lower-indexed transaction that updates this account
+            // hasn't executed yet. We should retry later.
+            return Err(ExecutionError::Retry);
         }
         
-        // Validate balance
+        // Validate balance - if insufficient, retry (might be updated by another tx)
         if sender_state.balance < tx.value {
-            return Err("Insufficient balance".to_string());
+            return Err(ExecutionError::Retry);
         }
         
         // Read receiver account
@@ -256,6 +341,10 @@ impl ParallelExecutor {
                 state
             }
             ReadResult::Storage => {
+                // Record storage read for push-based invalidation!
+                // When a lower-indexed tx writes to this address, we must be invalidated.
+                mv_hashmap.record_storage_read(address, reader_txn_idx);
+                
                 // Read from initial state
                 initial_states
                     .get(&address)
@@ -263,7 +352,7 @@ impl ParallelExecutor {
                     .unwrap_or(AccountState::new(0, U256::ZERO))
             }
             ReadResult::Dependency(_) => {
-                // This shouldn't happen in our sequential-order execution
+                // This shouldn't happen in our implementation
                 initial_states
                     .get(&address)
                     .copied()
@@ -276,33 +365,77 @@ impl ParallelExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::keccak256;
+    use k256::ecdsa::{SigningKey, VerifyingKey};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+
+    /// A test account with signing key.
+    struct TestAccount {
+        signing_key: SigningKey,
+        address: Address,
+    }
+
+    impl TestAccount {
+        fn from_seed(seed: u64) -> Self {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut key_bytes = [0u8; 32];
+            rng.fill(&mut key_bytes);
+            let signing_key = SigningKey::from_bytes(&key_bytes.into())
+                .expect("valid key bytes");
+            let verifying_key = VerifyingKey::from(&signing_key);
+            let address = public_key_to_address(&verifying_key);
+            Self { signing_key, address }
+        }
+
+        fn sign_tx(&self, to: Address, value: U256, nonce: u64) -> Transaction {
+            let tx_hash = compute_tx_hash(self.address, to, value, nonce);
+            let (sig, recovery_id) = self.signing_key
+                .sign_prehash_recoverable(tx_hash.as_slice())
+                .expect("signing should succeed");
+            let signature = Signature::from_signature_and_parity(sig, recovery_id.is_y_odd());
+            
+            Transaction {
+                from: self.address,
+                to,
+                value,
+                nonce,
+                signature,
+                tx_hash,
+            }
+        }
+    }
+
+    fn public_key_to_address(verifying_key: &VerifyingKey) -> Address {
+        let public_key_bytes = verifying_key.to_encoded_point(false);
+        let hash = keccak256(&public_key_bytes.as_bytes()[1..]);
+        Address::from_slice(&hash[12..])
+    }
+
+    fn compute_tx_hash(from: Address, to: Address, value: U256, nonce: u64) -> B256 {
+        let mut data = Vec::with_capacity(20 + 20 + 32 + 8);
+        data.extend_from_slice(from.as_slice());
+        data.extend_from_slice(to.as_slice());
+        data.extend_from_slice(&value.to_be_bytes::<32>());
+        data.extend_from_slice(&nonce.to_be_bytes());
+        keccak256(&data)
+    }
 
     #[test]
     fn test_parallel_execution_simple() {
-        let addr1 = Address::random();
-        let addr2 = Address::random();
-        let addr3 = Address::random();
+        // Generate test accounts with proper signing keys
+        let acc1 = TestAccount::from_seed(1);
+        let acc2 = TestAccount::from_seed(2);
+        let acc3 = TestAccount::from_seed(3);
         
         let mut initial_states = HashMap::new();
-        initial_states.insert(addr1, AccountState::new(0, U256::from(1000)));
-        initial_states.insert(addr2, AccountState::new(0, U256::from(1000)));
-        initial_states.insert(addr3, AccountState::new(0, U256::from(1000)));
+        initial_states.insert(acc1.address, AccountState::new(0, U256::from(1000)));
+        initial_states.insert(acc2.address, AccountState::new(0, U256::from(1000)));
+        initial_states.insert(acc3.address, AccountState::new(0, U256::from(1000)));
         
+        // Create properly signed transactions
         let transactions = vec![
-            Transaction {
-                from: addr1,
-                to: addr2,
-                value: U256::from(10),
-                nonce: 0,
-                signature_valid: true,
-            },
-            Transaction {
-                from: addr2,
-                to: addr3,
-                value: U256::from(5),
-                nonce: 0,
-                signature_valid: true,
-            },
+            acc1.sign_tx(acc2.address, U256::from(10), 0),
+            acc2.sign_tx(acc3.address, U256::from(5), 0),
         ];
         
         let config = ExecutorConfig {

@@ -36,6 +36,9 @@ pub struct Scheduler {
     
     /// Whether execution is done.
     done: AtomicBool,
+    
+    /// Lock for committing transactions (only one thread can commit at a time).
+    commit_lock: Mutex<()>,
 }
 
 impl Scheduler {
@@ -57,6 +60,7 @@ impl Scheduler {
             committed_idx: AtomicUsize::new(0),
             executed_once_count: AtomicUsize::new(0),
             done: AtomicBool::new(false),
+            commit_lock: Mutex::new(()),
         })
     }
 
@@ -104,17 +108,18 @@ impl Scheduler {
         
         // Track if this was the first execution
         if incarnation == 0 {
-            let prev = self.executed_once_count.fetch_add(1, Ordering::AcqRel);
-            
-            // If this was the last transaction to execute once, try to commit
-            if prev + 1 == self.num_txns {
-                self.try_commit_transactions();
-            }
+            self.executed_once_count.fetch_add(1, Ordering::AcqRel);
         }
         
         // Abort invalidated transactions
         for &invalid_idx in &invalidated {
             self.abort_transaction(invalid_idx);
+        }
+        
+        // Try to acquire commit lock and commit transactions
+        // Only one thread should do this at a time to avoid contention
+        if let Some(_guard) = self.commit_lock.try_lock() {
+            self.try_commit_transactions();
         }
     }
 
@@ -140,6 +145,7 @@ impl Scheduler {
     /// Tries to commit transactions in order.
     fn try_commit_transactions(&self) {
         let mut committed_idx = self.committed_idx.load(Ordering::Acquire);
+        let start_idx = committed_idx;
         
         // Commit transactions in order as long as they're executed
         while committed_idx < self.num_txns {
@@ -163,9 +169,21 @@ impl Scheduler {
             }
         }
         
+        // Log commit progress every 1000 commits
+        if start_idx % 1000 == 0 && committed_idx > start_idx {
+            eprintln!(
+                "[Scheduler] Committed {} -> {} (total: {}/{})",
+                start_idx,
+                committed_idx,
+                committed_idx,
+                self.num_txns
+            );
+        }
+        
         // If all transactions are committed, mark as done
         if committed_idx >= self.num_txns {
             self.done.store(true, Ordering::Release);
+            eprintln!("[Scheduler] All {} transactions committed!", self.num_txns);
         }
     }
 

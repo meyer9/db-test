@@ -29,6 +29,10 @@ pub struct VersionedEntry {
 pub struct MVHashMap {
     /// Map from address to version history.
     data: DashMap<Address, BTreeMap<TxnIndex, VersionedEntry>>,
+    /// Transactions that have read from storage (initial state) for each address.
+    /// When a transaction writes to an address, all storage readers with higher
+    /// indices must be invalidated.
+    storage_readers: DashMap<Address, Vec<TxnIndex>>,
 }
 
 /// Result of reading from the MVHashMap.
@@ -54,6 +58,7 @@ impl MVHashMap {
     pub fn new() -> Self {
         Self {
             data: DashMap::new(),
+            storage_readers: DashMap::new(),
         }
     }
 
@@ -89,8 +94,9 @@ impl MVHashMap {
 
     /// Writes a new version of an account state.
     ///
-    /// This invalidates any transactions that read from the previous version
-    /// at this address and have a higher transaction index.
+    /// This invalidates:
+    /// 1. Transactions that read from the previous version (from a lower-indexed tx)
+    /// 2. Transactions that read from storage (if this is the first write to this address)
     ///
     /// Returns the list of transaction indices that need to be invalidated.
     pub fn write(
@@ -101,6 +107,24 @@ impl MVHashMap {
         state: AccountState,
     ) -> WriteResult {
         let mut invalidated = Vec::new();
+        
+        // Check if there are any lower-indexed versions
+        let has_lower_version = self.data.get(&address).map_or(false, |versions| {
+            versions.range(..writer_txn_idx).next_back().is_some()
+        });
+        
+        // If no lower version exists, invalidate storage readers
+        // (transactions that read from initial state for this address)
+        if !has_lower_version {
+            if let Some(storage_readers) = self.storage_readers.get(&address) {
+                invalidated.extend(
+                    storage_readers
+                        .iter()
+                        .filter(|&&reader_idx| reader_idx > writer_txn_idx)
+                        .copied(),
+                );
+            }
+        }
         
         self.data
             .entry(address)
@@ -160,6 +184,18 @@ impl MVHashMap {
                 }
             }
         }
+    }
+
+    /// Records that a transaction has read from storage (initial state).
+    ///
+    /// This is critical for push-based invalidation: when a transaction writes
+    /// to an address that was previously only in storage, all transactions that
+    /// read from storage for that address (with higher indices) must be invalidated.
+    pub fn record_storage_read(&self, address: Address, reader_txn_idx: TxnIndex) {
+        self.storage_readers
+            .entry(address)
+            .or_default()
+            .push(reader_txn_idx);
     }
 
     /// Clears all versions for a transaction (used when aborting/re-executing).

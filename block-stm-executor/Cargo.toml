@@ -25,6 +25,10 @@ reth-primitives-traits = { path = "../../reth/crates/primitives-traits", optiona
 eyre = { version = "0.6", optional = true }
 tempfile = "3"
 
+[dev-dependencies]
+k256 = { version = "0.13", features = ["ecdsa"] }
+rand = "0.8"
+
 [features]
 default = []
 mdbx = ["dep:reth-db", "dep:reth-db-api", "dep:reth-libmdbx", "dep:reth-primitives-traits", "dep:eyre"]

@@ -51,6 +51,7 @@ impl Executor for BlockStmExecutor {
         }
         
         // Convert all transactions across all blocks to Block-STM format
+        // Note: We pass signature data so verification happens in parallel workers
         let mut block_stm_txs = Vec::new();
         for block in &workload.blocks {
             for tx in block {
@@ -59,7 +60,8 @@ impl Executor for BlockStmExecutor {
                     to: tx.to,
                     value: tx.value,
                     nonce: tx.nonce,
-                    signature_valid: tx.recover_signer().is_some(),
+                    signature: tx.signature,
+                    tx_hash: tx.tx_hash,
                 });
             }
         }
@@ -129,8 +131,8 @@ mod tests {
         let (_, result) = executor.execute(db, &workload);
         
         // All transactions should succeed with no conflicts
-        assert_eq!(result.total_successful, 20);
-        assert_eq!(result.total_failed, 0);
+        assert_eq!(result.successful, 20);
+        assert_eq!(result.failed, 0);
     }
 }
 
