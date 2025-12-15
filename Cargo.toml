@@ -1,0 +1,18 @@
+[package]
+name = "db-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+revm = { version = "33", features = ["std"] }
+alloy-primitives = { version = "1", features = ["k256"] }
+alloy-consensus = "0.14"
+k256 = { version = "0.13", features = ["ecdsa"] }
+rand = "0.8"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "eth_transfer"
+harness = false
