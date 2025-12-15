@@ -259,7 +259,7 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Test with different thread counts
-        let thread_counts = [1, 2, 4, 8];
+        let thread_counts = [1, 4, 16, 64];
         
         for &num_threads in &thread_counts {
             println!("--- {} threads ---", num_threads);

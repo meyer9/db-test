@@ -43,7 +43,8 @@ pub struct ThreadResult {
     pub thread_id: usize,
     /// Number of successful transactions.
     pub successful: usize,
-    /// Number of failed transactions.
+    /// Number of permanently failed transactions (e.g., invalid signatures).
+    /// Validation failures (nonce mismatch, insufficient balance) are retried until success.
     pub failed: usize,
 }
 
@@ -52,6 +53,15 @@ pub struct ThreadResult {
 /// This executor processes transactions in parallel using multiple threads.
 /// Each transaction is executed atomically through FoundationDB's `Database::run`
 /// which automatically retries on conflicts until success.
+///
+/// # Retry Behavior
+/// - **FDB conflicts**: Automatic infinite retry (handled by FDB)
+/// - **Nonce mismatches**: Manual infinite retry with 100μs delay
+/// - **Insufficient balance**: Manual infinite retry with 100μs delay
+/// - **Invalid signatures**: Permanent failure (no retry)
+///
+/// This means transactions will eventually succeed (showing decreased TPS) rather
+/// than failing outright. Only signatures that are cryptographically invalid will fail.
 ///
 /// # Example
 ///
@@ -197,11 +207,17 @@ impl FdbParallelExecutor {
         })
     }
 
-    /// Executes transactions on a single thread.
+    /// Executes transactions on a single thread with infinite retry.
     /// 
     /// IMPORTANT: Each ETH transfer is executed as its own independent FDB transaction.
     /// This allows maximum concurrency - multiple threads can execute transfers in parallel,
     /// and FDB's MVCC will automatically detect conflicts and retry until success.
+    /// 
+    /// Retry behavior:
+    /// - Invalid signatures: Fail immediately (permanent error)
+    /// - Nonce mismatches: Retry with 100μs delay (another tx might advance the nonce)
+    /// - Insufficient balance: Retry with 100μs delay (another tx might credit the account)
+    /// - FDB conflicts: Automatic retry (handled by db.run())
     /// 
     /// The `workload.blocks` structure is ignored - we process all transactions in a flat list.
     fn execute_thread(
@@ -220,69 +236,90 @@ impl FdbParallelExecutor {
             
             // ═══════════════════════════════════════════════════════════════════════════
             // Each iteration of this loop = ONE FDB transaction (one ETH transfer)
-            // db.run() provides automatic conflict detection and infinite retry
+            // We retry until success - validation failures will retry after a delay
+            // db.run() provides automatic conflict detection and retry
             // ═══════════════════════════════════════════════════════════════════════════
-            let result = rt.block_on(async {
-                db.run(|trx, _maybe_committed| {
-                    let tx = tx.clone();
-                    async move {
-                        // Verify signature if enabled
-                        if verify_signatures {
-                            let recovered = tx.recover_signer();
-                            if recovered.is_none() || recovered.unwrap() != tx.from {
-                                return Ok(false);
-                            }
-                        }
-                        
-                        // Get sender account
-                        let sender_key = Self::account_key(tx.from);
-                        let sender_data = trx.get(&sender_key, false).await?;
-                        
-                        let sender_data = match sender_data {
-                            Some(data) => data,
-                            None => return Ok(false),
-                        };
-                        
-                        let (sender_nonce, sender_balance) = Self::decode_account(&sender_data);
-                        
-                        // Check nonce
-                        if sender_nonce != tx.nonce {
-                            return Ok(false);
-                        }
-                        
-                        // Check balance
-                        if sender_balance < tx.value {
-                            return Ok(false);
-                        }
-                        
-                        // Get receiver account
-                        let receiver_key = Self::account_key(tx.to);
-                        let receiver_data = trx.get(&receiver_key, false).await?;
-                        
-                        let (receiver_nonce, receiver_balance) = if let Some(data) = receiver_data {
-                            Self::decode_account(&data)
-                        } else {
-                            (0, U256::ZERO)
-                        };
-                        
-                        // Execute transfer
-                        let new_sender_balance = sender_balance - tx.value;
-                        let new_sender_nonce = sender_nonce + 1;
-                        let new_receiver_balance = receiver_balance + tx.value;
-                        
-                        // Write updates
-                        trx.set(&sender_key, &Self::encode_account(new_sender_nonce, new_sender_balance));
-                        trx.set(&receiver_key, &Self::encode_account(receiver_nonce, new_receiver_balance));
-                        
-                        Ok(true)
-                    }
-                })
-                .await
-            });
             
-            match result {
-                Ok(true) => successful += 1,
-                Ok(false) | Err(_) => failed += 1,
+            // Verify signature once upfront (permanent failure if invalid)
+            if verify_signatures {
+                let recovered = tx.recover_signer();
+                if recovered.is_none() || recovered.unwrap() != tx.from {
+                    failed += 1;
+                    continue; // Skip this transaction - signature is permanently invalid
+                }
+            }
+            
+            // Retry loop for validation failures (nonce mismatch, insufficient balance)
+            loop {
+                let result = rt.block_on(async {
+                    db.run(|trx, _maybe_committed| {
+                        let tx = tx.clone();
+                        async move {
+                            // Get sender account
+                            let sender_key = Self::account_key(tx.from);
+                            let sender_data = trx.get(&sender_key, false).await?;
+                            
+                            let sender_data = match sender_data {
+                                Some(data) => data,
+                                None => return Ok(false), // Account not found
+                            };
+                            
+                            let (sender_nonce, sender_balance) = Self::decode_account(&sender_data);
+                            
+                            // Check nonce - might be wrong due to out-of-order parallel execution
+                            if sender_nonce != tx.nonce {
+                                return Ok(false); // Nonce mismatch - will retry
+                            }
+                            
+                            // Check balance
+                            if sender_balance < tx.value {
+                                return Ok(false); // Insufficient balance - will retry
+                            }
+                            
+                            // Get receiver account
+                            let receiver_key = Self::account_key(tx.to);
+                            let receiver_data = trx.get(&receiver_key, false).await?;
+                            
+                            let (receiver_nonce, receiver_balance) = if let Some(data) = receiver_data {
+                                Self::decode_account(&data)
+                            } else {
+                                (0, U256::ZERO)
+                            };
+                            
+                            // Execute transfer
+                            let new_sender_balance = sender_balance - tx.value;
+                            let new_sender_nonce = sender_nonce + 1;
+                            let new_receiver_balance = receiver_balance + tx.value;
+                            
+                            // Write updates
+                            trx.set(&sender_key, &Self::encode_account(new_sender_nonce, new_sender_balance));
+                            trx.set(&receiver_key, &Self::encode_account(receiver_nonce, new_receiver_balance));
+                            
+                            Ok(true) // Success!
+                        }
+                    })
+                    .await
+                });
+                
+                match result {
+                    Ok(true) => {
+                        // Transaction succeeded
+                        successful += 1;
+                        break;
+                    }
+                    Ok(false) => {
+                        // Validation failed (nonce mismatch or insufficient balance)
+                        // Wait a tiny bit and retry - another transaction might complete
+                        std::thread::sleep(std::time::Duration::from_micros(100));
+                        continue; // Retry the transaction
+                    }
+                    Err(_) => {
+                        // FDB error (should be rare due to automatic retry)
+                        // Wait and retry
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        continue;
+                    }
+                }
             }
         }
         
