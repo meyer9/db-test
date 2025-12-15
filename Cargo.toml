@@ -4,12 +4,24 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[features]
+default = []
+mdbx = ["dep:reth-db", "dep:reth-db-api", "dep:reth-libmdbx", "dep:reth-primitives-traits", "dep:eyre"]
+
 [dependencies]
 revm = { version = "33", features = ["std"] }
 alloy-primitives = { version = "1", features = ["k256"] }
 alloy-consensus = "0.14"
 k256 = { version = "0.13", features = ["ecdsa"] }
 rand = "0.8"
+
+# MDBX database support (optional)
+reth-db = { path = "../reth/crates/storage/db", optional = true }
+reth-db-api = { path = "../reth/crates/storage/db-api", optional = true }
+reth-libmdbx = { path = "../reth/crates/storage/libmdbx-rs", optional = true }
+reth-primitives-traits = { path = "../reth/crates/primitives-traits", optional = true }
+eyre = { version = "0.6", optional = true }
+tempfile = "3"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

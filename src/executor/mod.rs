@@ -5,7 +5,13 @@
 
 mod sequential;
 
+#[cfg(feature = "mdbx")]
+mod mdbx;
+
 pub use sequential::SequentialExecutor;
+
+#[cfg(feature = "mdbx")]
+pub use mdbx::{MdbxDatabase, MdbxSequentialExecutor};
 
 use crate::Workload;
 
@@ -86,7 +92,6 @@ impl ExecutionResult {
 ///
 /// pub struct ParallelExecutor {
 ///     pub verify_signatures: bool,
-///     pub ordering: OrderingMode,
 ///     pub num_threads: usize,
 /// }
 ///
@@ -98,13 +103,12 @@ impl ExecutionResult {
 ///         db: Self::Database,
 ///         workload: &Workload,
 ///     ) -> (Self::Database, ExecutionResult) {
-///         if self.ordering.is_strict() {
-///             // Use strict ordering strategy
-///         } else {
-///             // Can reorder transactions for better parallelism
-///         }
 ///         // Your implementation here
 ///         todo!()
+///     }
+///
+///     fn preserves_order(&self) -> bool {
+///         false // Parallel executor may reorder transactions
 ///     }
 /// }
 /// ```
@@ -125,4 +129,18 @@ pub trait Executor {
         db: Self::Database,
         workload: &Workload,
     ) -> (Self::Database, ExecutionResult);
+
+    /// Returns whether this executor preserves strict transaction ordering.
+    ///
+    /// If true, transactions are guaranteed to execute in the exact order they
+    /// appear in the workload. If false, transactions may be reordered for
+    /// performance (though per-sender ordering is always preserved).
+    fn preserves_order(&self) -> bool {
+        true // Default to strict ordering for safety
+    }
+
+    /// Returns a human-readable name for this executor.
+    fn name(&self) -> &'static str {
+        "unknown"
+    }
 }

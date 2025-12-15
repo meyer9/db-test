@@ -46,12 +46,19 @@ pub trait Executor {
 ```
 
 Currently implemented:
-- **SequentialExecutor**: Baseline sequential execution with optional signature verification
+- **SequentialExecutor**: In-memory (CacheDB) sequential execution
+- **MdbxSequentialExecutor**: MDBX-backed persistent storage (requires `mdbx` feature)
 
 Planned implementations:
 - Parallel execution
 - Optimistic execution with conflict detection
 - Batched execution
+
+#### Executor Capabilities
+
+All executors implement methods to query their behavior:
+- `preserves_order()` - Returns `true` if transactions execute in strict order
+- `name()` - Returns a human-readable identifier for benchmarking
 
 ### Signature Verification
 
@@ -65,14 +72,41 @@ Transactions are pre-signed during workload generation. During execution:
 ## Quick Start
 
 ```bash
-# Run a quick benchmark
+# Run a quick benchmark (in-memory)
 cargo run --release
+
+# Run with MDBX persistent storage
+cargo run --example mdbx_benchmark --features mdbx --release
 
 # Run the full criterion benchmarks
 cargo bench
 
-# Run tests
-cargo test
+# Run tests (including MDBX if feature enabled)
+cargo test --all-features
+```
+
+## Features
+
+### MDBX Persistent Storage
+
+Enable the `mdbx` feature to use MDBX for persistent storage:
+
+```toml
+[dependencies]
+db-test = { version = "*", features = ["mdbx"] }
+```
+
+The MDBX backend uses Reth's database implementation with two tables:
+- **HashedAccounts**: Stores account state indexed by `keccak256(address)`
+- **HashedStorages**: DupSort table storing storage values by hashed account and key
+
+```rust
+use db_test::executor::MdbxSequentialExecutor;
+use tempfile::tempdir;
+
+let dir = tempdir()?;
+let executor = MdbxSequentialExecutor::new(dir.path(), true)?;
+let (result, _) = executor.execute_workload(&workload)?;
 ```
 
 ## Configuration

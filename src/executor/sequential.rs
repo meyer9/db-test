@@ -143,6 +143,14 @@ impl Executor for SequentialExecutor {
             ExecutionResult::new(successful, failed),
         )
     }
+
+    fn preserves_order(&self) -> bool {
+        true // Sequential execution always preserves order
+    }
+
+    fn name(&self) -> &'static str {
+        "sequential_in_memory"
+    }
 }
 
 #[cfg(test)]
