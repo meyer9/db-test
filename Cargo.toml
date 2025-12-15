@@ -26,7 +26,7 @@ tempfile = "3"
 
 # FoundationDB support (optional)
 foundationdb = { version = "0.10", features = ["embedded-fdb-include", "fdb-7_4"], optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

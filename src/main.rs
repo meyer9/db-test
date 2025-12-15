@@ -8,6 +8,13 @@ use db_test::executor::{MdbxBatchedExecutor, MdbxSequentialExecutor};
 #[cfg(feature = "mdbx")]
 use tempfile::tempdir;
 
+#[cfg(feature = "fdb")]
+use db_test::executor::FdbParallelExecutor;
+#[cfg(feature = "fdb")]
+use tokio;
+#[cfg(feature = "fdb")]
+use foundationdb;
+
 /// Configuration for a single benchmark run.
 struct BenchmarkConfig {
     name: &'static str,
@@ -237,6 +244,80 @@ fn main() {
         println!();
     }
 
+    // Run benchmarks for FoundationDB executor if feature is enabled
+    #[cfg(feature = "fdb")]
+    {
+        println!("════════════════════════════════════════════════════════════════════════════════════════════════════════════");
+        println!("  FoundationDB Parallel Executor (Multi-threaded with automatic retry)");
+        println!("════════════════════════════════════════════════════════════════════════════════════════════════════════════");
+        println!();
+
+        // Initialize FDB network once (required before any FDB operations)
+        let _fdb_network = unsafe { foundationdb::boot() };
+        
+        // Give network time to start
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Test with different thread counts
+        let thread_counts = [1, 2, 4, 8];
+        
+        for &num_threads in &thread_counts {
+            println!("--- {} threads ---", num_threads);
+            BenchmarkResult::print_header();
+
+            for config in &configs {
+                let workload_config = WorkloadConfig {
+                    num_accounts,
+                    num_transactions,
+                    conflict_factor: config.conflict_factor,
+                    seed: 42,
+                    chain_id: 1,
+                    transactions_per_block,
+                };
+
+                let workload = Workload::generate(workload_config);
+
+                // Create FDB executor - needs async
+                let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+                let result = rt.block_on(async {
+                    let executor = FdbParallelExecutor::new(num_threads, true)
+                        .await
+                        .expect("Failed to create FDB executor");
+
+                    let start = Instant::now();
+                    let result = executor
+                        .execute_workload(&workload)
+                        .await
+                        .expect("Execution failed");
+                    let elapsed = start.elapsed();
+
+                    BenchmarkResult {
+                        config_name: config.name,
+                        executor_name: executor.name(),
+                        preserves_order: executor.preserves_order(),
+                        successful: result.total_successful,
+                        failed: result.total_failed,
+                        duration_ms: elapsed.as_secs_f64() * 1000.0,
+                        throughput_tps: num_transactions as f64 / elapsed.as_secs_f64(),
+                    }
+                });
+
+                result.print();
+                all_results.push(result);
+            }
+
+            println!();
+        }
+    }
+
+    #[cfg(not(feature = "fdb"))]
+    {
+        println!("════════════════════════════════════════════════════════════════════════════════════════════════════════════");
+        println!("  FoundationDB executor not available (enable with --features fdb)");
+        println!("════════════════════════════════════════════════════════════════════════════════════════════════════════════");
+        println!();
+    }
+
     // Print summary statistics
     println!("════════════════════════════════════════════════════════════════════════════════════════════════════════════");
     println!("  Summary Statistics");
@@ -280,6 +361,9 @@ fn main() {
     }
 
     println!("════════════════════════════════════════════════════════════════════════════════════════════════════════════");
-    println!("Benchmark complete! Run with --features mdbx to include persistent storage benchmarks.");
+    println!("Benchmark complete!");
+    println!("  • Run with --features mdbx to include MDBX benchmarks");
+    println!("  • Run with --features fdb to include FoundationDB benchmarks");
+    println!("  • Run with --all-features to include all backends");
     println!("════════════════════════════════════════════════════════════════════════════════════════════════════════════");
 }
