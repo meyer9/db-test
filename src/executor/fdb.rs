@@ -90,10 +90,11 @@ impl FdbParallelExecutor {
     pub async fn clear_database(&self) -> Result<(), FdbBindingError> {
         let db = self.db.clone();
         
-        // Use a transaction to clear all keys in the database
+        // Use a transaction to clear our account key space
+        // Using a narrow range is better practice than clearing everything
         db.run(|trx, _maybe_committed| async move {
-            // Clear the entire key space
-            trx.clear_range(b"", b"\xff");
+            // Clear only our account keyspace
+            trx.clear_range(b"account/", b"account/\xff");
             Ok(())
         })
         .await?;
@@ -102,27 +103,41 @@ impl FdbParallelExecutor {
     }
 
     /// Initializes accounts in the database.
+    /// Batches the writes to avoid transaction_too_old errors.
     pub async fn init_accounts(&self, accounts: &[(Address, U256)]) -> Result<(), FdbBindingError> {
         let db = self.db.clone();
-        let accounts = accounts.to_vec();
         
-        db.run(|trx, _maybe_committed| {
-            let accounts = accounts.clone();
-            async move {
-                for (address, balance) in accounts {
-                    let key = Self::account_key(address);
-                    let value = Self::encode_account(0, balance);
-                    trx.set(&key, &value);
+        // Batch size - keep transactions small to avoid hitting time limits
+        const BATCH_SIZE: usize = 1000;
+        
+        // Process accounts in batches
+        for chunk in accounts.chunks(BATCH_SIZE) {
+            let accounts_batch = chunk.to_vec();
+            
+            db.run(|trx, _maybe_committed| {
+                let accounts_batch = accounts_batch.clone();
+                async move {
+                    for (address, balance) in accounts_batch {
+                        let key = Self::account_key(address);
+                        let value = Self::encode_account(0, balance);
+                        trx.set(&key, &value);
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-        })
-        .await?;
+            })
+            .await?;
+        }
         
         Ok(())
     }
 
     /// Executes a workload across multiple threads with parallel execution.
+    /// 
+    /// Transaction boundaries: Each ETH transfer = one FDB transaction
+    /// - We use workload.transactions (flat list), NOT workload.blocks
+    /// - Each thread processes a subset of transactions
+    /// - Each transaction within a thread is an independent FDB transaction
+    /// - FDB handles all conflict detection and retry automatically
     pub async fn execute_workload(
         &self,
         workload: &Workload,
@@ -130,7 +145,7 @@ impl FdbParallelExecutor {
         // Clear the database first
         self.clear_database().await?;
         
-        // Initialize accounts
+        // Initialize accounts in batches to avoid transaction_too_old
         let accounts: Vec<_> = workload
             .accounts
             .iter()
@@ -139,7 +154,7 @@ impl FdbParallelExecutor {
         
         self.init_accounts(&accounts).await?;
 
-        // Divide transactions among threads
+        // Divide transactions among threads (each thread gets a slice of the flat transaction list)
         let txs_per_thread = (workload.transactions.len() + self.num_threads - 1) / self.num_threads;
         
         let mut handles = Vec::new();
@@ -183,7 +198,12 @@ impl FdbParallelExecutor {
     }
 
     /// Executes transactions on a single thread.
-    /// Uses FoundationDB's automatic retry mechanism for each transaction.
+    /// 
+    /// IMPORTANT: Each ETH transfer is executed as its own independent FDB transaction.
+    /// This allows maximum concurrency - multiple threads can execute transfers in parallel,
+    /// and FDB's MVCC will automatically detect conflicts and retry until success.
+    /// 
+    /// The `workload.blocks` structure is ignored - we process all transactions in a flat list.
     fn execute_thread(
         thread_id: usize,
         db: Arc<Database>,
@@ -198,8 +218,10 @@ impl FdbParallelExecutor {
         for tx in transactions {
             let tx = tx.clone();
             
-            // Each transaction is executed in its own FDB transaction with automatic retry
-            // FDB's Database::run automatically retries on conflicts until success
+            // ═══════════════════════════════════════════════════════════════════════════
+            // Each iteration of this loop = ONE FDB transaction (one ETH transfer)
+            // db.run() provides automatic conflict detection and infinite retry
+            // ═══════════════════════════════════════════════════════════════════════════
             let result = rt.block_on(async {
                 db.run(|trx, _maybe_committed| {
                     let tx = tx.clone();
