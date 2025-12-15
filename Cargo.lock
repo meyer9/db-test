@@ -1470,6 +1470,7 @@ dependencies = [
  "alloy-consensus 0.14.0",
  "alloy-primitives",
  "block-stm-executor",
+ "clap",
  "criterion",
  "eyre",
  "foundationdb",

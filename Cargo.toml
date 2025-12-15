@@ -16,6 +16,7 @@ alloy-primitives = { version = "1", features = ["k256"] }
 alloy-consensus = "0.14"
 k256 = { version = "0.13", features = ["ecdsa"] }
 rand = "0.8"
+clap = { version = "4", features = ["derive"] }
 
 # MDBX database support (optional)
 reth-db = { path = "../reth/crates/storage/db", optional = true }
