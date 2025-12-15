@@ -265,8 +265,8 @@ fn main() {
                 conflict_name,
                 executor_name: executor.name().to_string(),
                 preserves_order: executor.preserves_order(),
-                successful: result.total_successful,
-                failed: result.total_failed,
+                successful: result.successful,
+                failed: result.failed,
                 duration_ms: elapsed.as_secs_f64() * 1000.0,
                 throughput_tps: args.num_transactions as f64 / elapsed.as_secs_f64(),
             };
