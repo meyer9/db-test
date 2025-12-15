@@ -7,6 +7,7 @@ license = "MIT"
 [features]
 default = []
 mdbx = ["dep:reth-db", "dep:reth-db-api", "dep:reth-libmdbx", "dep:reth-primitives-traits", "dep:eyre"]
+fdb = ["dep:foundationdb", "dep:tokio"]
 
 [dependencies]
 revm = { version = "33", features = ["std"] }
@@ -22,6 +23,10 @@ reth-libmdbx = { path = "../reth/crates/storage/libmdbx-rs", optional = true }
 reth-primitives-traits = { path = "../reth/crates/primitives-traits", optional = true }
 eyre = { version = "0.6", optional = true }
 tempfile = "3"
+
+# FoundationDB support (optional)
+foundationdb = { version = "0.10", features = ["embedded-fdb-include", "fdb-7_4"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

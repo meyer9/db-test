@@ -1,0 +1,361 @@
+//! FoundationDB parallel executor with automatic conflict resolution.
+//!
+//! This executor uses FoundationDB's built-in MVCC and optimistic concurrency control
+//! to execute transactions in parallel across multiple threads. Conflicts are automatically
+//! retried an infinite number of times until they succeed.
+//!
+//! Key features:
+//! - Parallel execution across configurable number of threads
+//! - Automatic conflict detection and retry
+//! - Atomic transactions
+//! - Does NOT preserve strict ordering due to parallel execution and retries
+
+use alloy_primitives::{keccak256, Address, U256};
+use foundationdb::{Database, FdbBindingError};
+use std::sync::Arc;
+use std::thread;
+
+use super::ExecutionResult;
+use crate::Workload;
+
+/// Result of multi-threaded execution with per-thread statistics.
+#[derive(Debug, Clone)]
+pub struct ParallelExecutionResult {
+    /// Results from each thread.
+    pub thread_results: Vec<ThreadResult>,
+    /// Total successful transactions across all threads.
+    pub total_successful: usize,
+    /// Total failed transactions across all threads.
+    pub total_failed: usize,
+}
+
+impl ParallelExecutionResult {
+    /// Converts to a simple ExecutionResult for compatibility.
+    pub fn to_execution_result(&self) -> ExecutionResult {
+        ExecutionResult::new(self.total_successful, self.total_failed)
+    }
+}
+
+/// Result from a single thread of execution.
+#[derive(Debug, Clone)]
+pub struct ThreadResult {
+    /// Thread ID.
+    pub thread_id: usize,
+    /// Number of successful transactions.
+    pub successful: usize,
+    /// Number of failed transactions.
+    pub failed: usize,
+}
+
+/// FoundationDB parallel executor with automatic retry and conflict resolution.
+///
+/// This executor processes transactions in parallel using multiple threads.
+/// Each transaction is executed atomically through FoundationDB's `Database::run`
+/// which automatically retries on conflicts until success.
+///
+/// # Example
+///
+/// ```ignore
+/// use db_test::executor::FdbParallelExecutor;
+/// use db_test::{Workload, WorkloadConfig};
+///
+/// let executor = FdbParallelExecutor::new(4, true).await?; // 4 threads
+/// let workload = Workload::generate(WorkloadConfig::default());
+/// let result = executor.execute_workload(&workload).await?;
+/// ```
+pub struct FdbParallelExecutor {
+    db: Arc<Database>,
+    verify_signatures: bool,
+    num_threads: usize,
+}
+
+impl FdbParallelExecutor {
+    /// Creates a new FoundationDB parallel executor.
+    ///
+    /// # Arguments
+    /// * `num_threads` - Number of threads to use for parallel execution
+    /// * `verify_signatures` - Whether to verify transaction signatures
+    pub async fn new(num_threads: usize, verify_signatures: bool) -> Result<Self, FdbBindingError> {
+        let db = Database::default()?;
+        
+        Ok(Self {
+            db: Arc::new(db),
+            verify_signatures,
+            num_threads: num_threads.max(1),
+        })
+    }
+
+    /// Clears all keys from the database.
+    /// This is useful for starting with a clean slate.
+    pub async fn clear_database(&self) -> Result<(), FdbBindingError> {
+        let db = self.db.clone();
+        
+        // Use a transaction to clear all keys in the database
+        db.run(|trx, _maybe_committed| async move {
+            // Clear the entire key space
+            trx.clear_range(b"", b"\xff");
+            Ok(())
+        })
+        .await?;
+        
+        Ok(())
+    }
+
+    /// Initializes accounts in the database.
+    pub async fn init_accounts(&self, accounts: &[(Address, U256)]) -> Result<(), FdbBindingError> {
+        let db = self.db.clone();
+        let accounts = accounts.to_vec();
+        
+        db.run(|trx, _maybe_committed| {
+            let accounts = accounts.clone();
+            async move {
+                for (address, balance) in accounts {
+                    let key = Self::account_key(address);
+                    let value = Self::encode_account(0, balance);
+                    trx.set(&key, &value);
+                }
+                Ok(())
+            }
+        })
+        .await?;
+        
+        Ok(())
+    }
+
+    /// Executes a workload across multiple threads with parallel execution.
+    pub async fn execute_workload(
+        &self,
+        workload: &Workload,
+    ) -> Result<ParallelExecutionResult, FdbBindingError> {
+        // Clear the database first
+        self.clear_database().await?;
+        
+        // Initialize accounts
+        let accounts: Vec<_> = workload
+            .accounts
+            .iter()
+            .map(|acc| (acc.address, U256::from(1_000_000_000_000_000_000_000u128)))
+            .collect();
+        
+        self.init_accounts(&accounts).await?;
+
+        // Divide transactions among threads
+        let txs_per_thread = (workload.transactions.len() + self.num_threads - 1) / self.num_threads;
+        
+        let mut handles = Vec::new();
+        
+        for thread_id in 0..self.num_threads {
+            let start_idx = thread_id * txs_per_thread;
+            let end_idx = (start_idx + txs_per_thread).min(workload.transactions.len());
+            
+            if start_idx >= workload.transactions.len() {
+                break;
+            }
+            
+            let thread_txs = workload.transactions[start_idx..end_idx].to_vec();
+            let db = self.db.clone();
+            let verify_signatures = self.verify_signatures;
+            
+            let handle = thread::spawn(move || {
+                Self::execute_thread(thread_id, db, &thread_txs, verify_signatures)
+            });
+            
+            handles.push(handle);
+        }
+        
+        // Collect results from all threads
+        let mut thread_results = Vec::new();
+        let mut total_successful = 0;
+        let mut total_failed = 0;
+        
+        for handle in handles {
+            let result = handle.join().expect("Thread panicked");
+            total_successful += result.successful;
+            total_failed += result.failed;
+            thread_results.push(result);
+        }
+        
+        Ok(ParallelExecutionResult {
+            thread_results,
+            total_successful,
+            total_failed,
+        })
+    }
+
+    /// Executes transactions on a single thread.
+    /// Uses FoundationDB's automatic retry mechanism for each transaction.
+    fn execute_thread(
+        thread_id: usize,
+        db: Arc<Database>,
+        transactions: &[crate::SignedTransaction],
+        verify_signatures: bool,
+    ) -> ThreadResult {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        
+        let mut successful = 0;
+        let mut failed = 0;
+        
+        for tx in transactions {
+            let tx = tx.clone();
+            
+            // Each transaction is executed in its own FDB transaction with automatic retry
+            // FDB's Database::run automatically retries on conflicts until success
+            let result = rt.block_on(async {
+                db.run(|trx, _maybe_committed| {
+                    let tx = tx.clone();
+                    async move {
+                        // Verify signature if enabled
+                        if verify_signatures {
+                            let recovered = tx.recover_signer();
+                            if recovered.is_none() || recovered.unwrap() != tx.from {
+                                return Ok(false);
+                            }
+                        }
+                        
+                        // Get sender account
+                        let sender_key = Self::account_key(tx.from);
+                        let sender_data = trx.get(&sender_key, false).await?;
+                        
+                        let sender_data = match sender_data {
+                            Some(data) => data,
+                            None => return Ok(false),
+                        };
+                        
+                        let (sender_nonce, sender_balance) = Self::decode_account(&sender_data);
+                        
+                        // Check nonce
+                        if sender_nonce != tx.nonce {
+                            return Ok(false);
+                        }
+                        
+                        // Check balance
+                        if sender_balance < tx.value {
+                            return Ok(false);
+                        }
+                        
+                        // Get receiver account
+                        let receiver_key = Self::account_key(tx.to);
+                        let receiver_data = trx.get(&receiver_key, false).await?;
+                        
+                        let (receiver_nonce, receiver_balance) = if let Some(data) = receiver_data {
+                            Self::decode_account(&data)
+                        } else {
+                            (0, U256::ZERO)
+                        };
+                        
+                        // Execute transfer
+                        let new_sender_balance = sender_balance - tx.value;
+                        let new_sender_nonce = sender_nonce + 1;
+                        let new_receiver_balance = receiver_balance + tx.value;
+                        
+                        // Write updates
+                        trx.set(&sender_key, &Self::encode_account(new_sender_nonce, new_sender_balance));
+                        trx.set(&receiver_key, &Self::encode_account(receiver_nonce, new_receiver_balance));
+                        
+                        Ok(true)
+                    }
+                })
+                .await
+            });
+            
+            match result {
+                Ok(true) => successful += 1,
+                Ok(false) | Err(_) => failed += 1,
+            }
+        }
+        
+        ThreadResult {
+            thread_id,
+            successful,
+            failed,
+        }
+    }
+
+    /// Returns whether this executor preserves transaction ordering.
+    pub fn preserves_order(&self) -> bool {
+        false // Parallel execution with retries does not guarantee order
+    }
+
+    /// Returns the name of this executor.
+    pub fn name(&self) -> &'static str {
+        "fdb_parallel"
+    }
+
+    /// Returns the number of threads.
+    pub fn num_threads(&self) -> usize {
+        self.num_threads
+    }
+
+    // Helper methods for key encoding
+    
+    fn account_key(address: Address) -> Vec<u8> {
+        let mut key = b"account/".to_vec();
+        key.extend_from_slice(keccak256(address.as_slice()).as_slice());
+        key
+    }
+    
+    fn encode_account(nonce: u64, balance: U256) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&nonce.to_be_bytes());
+        data.extend_from_slice(&balance.to_be_bytes::<32>());
+        data
+    }
+    
+    fn decode_account(data: &[u8]) -> (u64, U256) {
+        let nonce = u64::from_be_bytes(data[0..8].try_into().unwrap());
+        let balance = U256::from_be_bytes::<32>(data[8..40].try_into().unwrap());
+        (nonce, balance)
+    }
+    
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::WorkloadConfig;
+
+    #[tokio::test]
+    #[ignore] // Requires FoundationDB running
+    async fn test_fdb_parallel_executor() {
+        // This test requires FoundationDB to be running
+        let config = WorkloadConfig {
+            num_accounts: 20,
+            num_transactions: 50,
+            conflict_factor: 0.5, // Some conflicts
+            seed: 42,
+            chain_id: 1,
+            transactions_per_block: 10,
+        };
+
+        let workload = Workload::generate(config);
+        let executor = FdbParallelExecutor::new(4, true).await.unwrap();
+
+        let result = executor.execute_workload(&workload).await.unwrap();
+        
+        assert_eq!(result.total_successful, 50);
+        assert_eq!(result.total_failed, 0);
+        assert!(executor.preserves_order() == false);
+        assert_eq!(executor.name(), "fdb_parallel");
+        assert_eq!(executor.num_threads(), 4);
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires FoundationDB running
+    async fn test_clear_database() {
+        let executor = FdbParallelExecutor::new(1, true).await.unwrap();
+        
+        // Add some data
+        let accounts = vec![
+            (Address::with_last_byte(1), U256::from(1000)),
+            (Address::with_last_byte(2), U256::from(2000)),
+        ];
+        executor.init_accounts(&accounts).await.unwrap();
+        
+        // Clear database
+        executor.clear_database().await.unwrap();
+        
+        // Verify it's empty by trying to read
+        // (In a real test, you'd query the DB to verify)
+    }
+}
+

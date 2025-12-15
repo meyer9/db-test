@@ -11,6 +11,9 @@ mod mdbx;
 #[cfg(feature = "mdbx")]
 mod mdbx_batched;
 
+#[cfg(feature = "fdb")]
+mod fdb;
+
 pub use sequential::SequentialExecutor;
 
 #[cfg(feature = "mdbx")]
@@ -18,6 +21,9 @@ pub use mdbx::{MdbxDatabase, MdbxSequentialExecutor};
 
 #[cfg(feature = "mdbx")]
 pub use mdbx_batched::{BlockResult, MdbxBatchedExecutor, MultiBlockResult};
+
+#[cfg(feature = "fdb")]
+pub use fdb::{FdbParallelExecutor, ParallelExecutionResult, ThreadResult};
 
 use crate::Workload;
 
