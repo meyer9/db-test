@@ -57,11 +57,12 @@ pub struct ThreadResult {
 /// # Retry Behavior
 /// - **FDB conflicts**: Automatic infinite retry (handled by FDB)
 /// - **Nonce mismatches**: Manual infinite retry with 100μs delay
-/// - **Insufficient balance**: Manual infinite retry with 100μs delay
+/// - **Insufficient balance**: Manual infinite retry with 100μs delay (rare with 1 wei transfers)
 /// - **Invalid signatures**: Permanent failure (no retry)
 ///
-/// This means transactions will eventually succeed (showing decreased TPS) rather
-/// than failing outright. Only signatures that are cryptographically invalid will fail.
+/// With 1 wei transfers and large initial balances, retries are primarily due to nonce
+/// ordering in parallel execution. This means transactions will eventually succeed 
+/// (showing decreased TPS) rather than failing outright.
 ///
 /// # Example
 ///
@@ -215,9 +216,11 @@ impl FdbParallelExecutor {
     /// 
     /// Retry behavior:
     /// - Invalid signatures: Fail immediately (permanent error)
-    /// - Nonce mismatches: Retry with 100μs delay (another tx might advance the nonce)
-    /// - Insufficient balance: Retry with 100μs delay (another tx might credit the account)
+    /// - Nonce mismatches: Retry with 100μs delay (the main retry case with parallel execution)
+    /// - Insufficient balance: Retry with 100μs delay (rare with 1 wei transfers)
     /// - FDB conflicts: Automatic retry (handled by db.run())
+    /// 
+    /// With 1 wei transfers, nonce ordering is the primary challenge.
     /// 
     /// The `workload.blocks` structure is ignored - we process all transactions in a flat list.
     fn execute_thread(
@@ -249,7 +252,8 @@ impl FdbParallelExecutor {
                 }
             }
             
-            // Retry loop for validation failures (nonce mismatch, insufficient balance)
+            // Retry loop for validation failures
+            // With 1 wei transfers: primarily nonce mismatches from out-of-order execution
             loop {
                 let result = rt.block_on(async {
                     db.run(|trx, _maybe_committed| {

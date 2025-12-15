@@ -274,7 +274,7 @@ impl Workload {
                 let tx = SignedTransaction::new(
                     &accounts[from_idx],
                     accounts[to_idx].address,
-                    U256::from(1_000_000_000_000_000u64), // 0.001 ETH
+                    U256::from(1), // 1 wei - balance never an issue, focus on nonce ordering
                     *nonce,
                     config.chain_id,
                 );
