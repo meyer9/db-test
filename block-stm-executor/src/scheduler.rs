@@ -145,7 +145,6 @@ impl Scheduler {
     /// Tries to commit transactions in order.
     fn try_commit_transactions(&self) {
         let mut committed_idx = self.committed_idx.load(Ordering::Acquire);
-        let start_idx = committed_idx;
         
         // Commit transactions in order as long as they're executed
         while committed_idx < self.num_txns {
@@ -169,21 +168,9 @@ impl Scheduler {
             }
         }
         
-        // Log commit progress every 1000 commits
-        if start_idx % 1000 == 0 && committed_idx > start_idx {
-            eprintln!(
-                "[Scheduler] Committed {} -> {} (total: {}/{})",
-                start_idx,
-                committed_idx,
-                committed_idx,
-                self.num_txns
-            );
-        }
-        
         // If all transactions are committed, mark as done
         if committed_idx >= self.num_txns {
             self.done.store(true, Ordering::Release);
-            eprintln!("[Scheduler] All {} transactions committed!", self.num_txns);
         }
     }
 
@@ -203,6 +190,11 @@ impl Scheduler {
     /// Checks if all transactions are done.
     pub fn is_done(&self) -> bool {
         self.done.load(Ordering::Acquire)
+    }
+
+    /// Returns the number of committed transactions.
+    pub fn committed_count(&self) -> usize {
+        self.committed_idx.load(Ordering::Acquire)
     }
 
     /// Gets statistics about execution progress.

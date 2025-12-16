@@ -384,7 +384,7 @@ mod tests {
         let config = WorkloadConfig {
             num_accounts: 20,
             num_transactions: 50,
-            conflict_factor: 0.5, // Some conflicts
+            hot_accounts: 10, // Limited parallelism
             seed: 42,
             chain_id: 1,
             transactions_per_block: 10,

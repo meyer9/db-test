@@ -269,7 +269,7 @@ mod tests {
         let config = WorkloadConfig {
             num_accounts: 20,
             num_transactions: 50,
-            conflict_factor: 0.0,
+            hot_accounts: 100,
             seed: 42,
             chain_id: 1,
             transactions_per_block: 10,
@@ -318,7 +318,7 @@ mod tests {
         let config = WorkloadConfig {
             num_accounts: 10,
             num_transactions: 25, // Not evenly divisible by block size
-            conflict_factor: 0.0,
+            hot_accounts: 100,
             seed: 42,
             chain_id: 1,
             transactions_per_block: 10,

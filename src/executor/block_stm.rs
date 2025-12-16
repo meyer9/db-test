@@ -120,7 +120,7 @@ mod tests {
             num_accounts: 10,
             num_transactions: 20,
             transactions_per_block: 10,
-            conflict_factor: 0.0,
+            hot_accounts: 100,
             seed: 42,
             chain_id: 1,
         };

@@ -21,7 +21,7 @@
 //! let config = WorkloadConfig {
 //!     num_accounts: 100,
 //!     num_transactions: 50,
-//!     conflict_factor: 0.0,
+//!     hot_accounts: 100,
 //!     seed: 42,
 //!     chain_id: 1,
 //!     transactions_per_block: 10,
@@ -192,12 +192,15 @@ impl SignedTransaction {
 /// Configuration for workload generation.
 #[derive(Debug, Clone)]
 pub struct WorkloadConfig {
-    /// Total number of accounts in the system.
+    /// Total number of accounts in the system (for pre-funding).
     pub num_accounts: usize,
     /// Number of transactions to generate.
     pub num_transactions: usize,
-    /// Conflict factor: 0.0 = no conflicts, 1.0 = all transactions touch same accounts.
-    pub conflict_factor: f64,
+    /// Number of "hot" accounts that transactions transfer between.
+    /// - 2 = All transactions touch same 2 accounts (no parallelism possible)
+    /// - 10 = Transactions pick from 10 accounts (limited parallelism)
+    /// - num_accounts = Full account pool (maximum parallelism)
+    pub hot_accounts: usize,
     /// Random seed for reproducibility.
     pub seed: u64,
     /// Chain ID for transaction signing.
@@ -211,7 +214,7 @@ impl Default for WorkloadConfig {
         Self {
             num_accounts: 50_000,      // Realistic account pool size
             num_transactions: 1_250,   // 2 blocks worth at default block size
-            conflict_factor: 0.0,
+            hot_accounts: 50_000,      // Use all accounts (no artificial conflicts)
             seed: 42,
             chain_id: 1,
             transactions_per_block: 625, // Mid-range of 2k-20k (scaled down for benchmarking)
@@ -247,34 +250,19 @@ impl Workload {
         // Track nonces per account for proper transaction sequencing.
         let mut nonces: HashMap<usize, u64> = HashMap::new();
 
-        // Calculate "hot" account range for conflict simulation.
-        let hot_account_count = if config.conflict_factor > 0.0 {
-            (2.0 + (1.0 - config.conflict_factor) * (config.num_accounts as f64 - 2.0))
-                .max(2.0) as usize
-        } else {
-            config.num_accounts
-        };
+        // Clamp hot_accounts to valid range [2, num_accounts]
+        let hot_account_count = config.hot_accounts.clamp(2, config.num_accounts);
 
         // Generate and sign transactions.
+        // All transactions pick from the first `hot_account_count` accounts.
         let transactions: Vec<SignedTransaction> = (0..config.num_transactions)
             .map(|_| {
-                let use_hot = rng.gen::<f64>() < config.conflict_factor;
-
-                let (from_idx, to_idx) = if use_hot {
-                    let from = rng.gen_range(0..hot_account_count);
-                    let mut to = rng.gen_range(0..hot_account_count);
-                    while to == from {
-                        to = rng.gen_range(0..hot_account_count);
-                    }
-                    (from, to)
-                } else {
-                    let from = rng.gen_range(0..config.num_accounts);
-                    let mut to = rng.gen_range(0..config.num_accounts);
-                    while to == from {
-                        to = rng.gen_range(0..config.num_accounts);
-                    }
-                    (from, to)
-                };
+                // Pick random sender and receiver from hot accounts
+                let from_idx = rng.gen_range(0..hot_account_count);
+                let mut to_idx = rng.gen_range(0..hot_account_count);
+                while to_idx == from_idx {
+                    to_idx = rng.gen_range(0..hot_account_count);
+                }
 
                 let nonce = nonces.entry(from_idx).or_insert(0);
                 let tx = SignedTransaction::new(
@@ -373,7 +361,7 @@ mod tests {
         let config = WorkloadConfig {
             num_accounts: 10,
             num_transactions: 20,
-            conflict_factor: 0.0,
+            hot_accounts: 100,
             seed: 123,
             chain_id: 1,
             transactions_per_block: 5,

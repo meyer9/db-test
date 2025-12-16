@@ -105,7 +105,7 @@ impl ParallelExecutor {
         
         // Spawn worker threads
         let mut handles = Vec::new();
-        for worker_id in 0..self.config.num_threads {
+        for _ in 0..self.config.num_threads {
             let scheduler = scheduler.clone();
             let mv_hashmap = mv_hashmap.clone();
             let transactions = transactions.clone();
@@ -117,7 +117,6 @@ impl ParallelExecutor {
             
             let handle = thread::spawn(move || {
                 Self::worker_loop(
-                    worker_id,
                     scheduler,
                     mv_hashmap,
                     transactions,
@@ -142,8 +141,11 @@ impl ParallelExecutor {
         // Collect final states
         let final_states = mv_hashmap.get_committed_states();
         
+        // The number of committed transactions is the final committed index
+        let committed_count = scheduler.committed_count();
+        
         BlockExecutionResult {
-            successful: success_count.load(Ordering::Acquire),
+            successful: committed_count - fail_count.load(Ordering::Acquire),
             failed: fail_count.load(Ordering::Acquire),
             total_executions: execution_count.load(Ordering::Acquire),
             final_states,
@@ -153,7 +155,6 @@ impl ParallelExecutor {
 
     /// Worker thread main loop.
     fn worker_loop(
-        worker_id: usize,
         scheduler: Arc<Scheduler>,
         mv_hashmap: Arc<MVHashMap>,
         transactions: Arc<Vec<Transaction>>,
@@ -163,15 +164,10 @@ impl ParallelExecutor {
         success_count: Arc<AtomicUsize>,
         fail_count: Arc<AtomicUsize>,
     ) {
-        let mut local_executions = 0;
-        let mut wait_count = 0;
-        
         loop {
             match scheduler.next_task() {
                 Task::Execute(txn_idx, incarnation) => {
-                    local_executions += 1;
                     execution_count.fetch_add(1, Ordering::Relaxed);
-                    wait_count = 0; // Reset wait counter on successful task
                     
                     let tx = &transactions[txn_idx];
                     
@@ -209,50 +205,12 @@ impl ParallelExecutor {
                         }
                     }
                     
-                    // Log progress every 1000 executions
-                    if local_executions % 1000 == 0 {
-                        let stats = scheduler.stats();
-                        let total_exec = execution_count.load(Ordering::Relaxed);
-                        eprintln!(
-                            "[Worker {}] Executed: {}, Total: {}, Pending: {}, Executing: {}, Executed: {}, Committed: {}, Incarnations: {}",
-                            worker_id,
-                            local_executions,
-                            total_exec,
-                            stats.pending,
-                            stats.executing,
-                            stats.executed,
-                            stats.committed,
-                            stats.total_incarnations
-                        );
-                    }
                 }
                 Task::Wait => {
                     // No task available, sleep briefly
-                    wait_count += 1;
-                    
-                    // Log if we're waiting too long
-                    if wait_count % 100 == 0 {
-                        let stats = scheduler.stats();
-                        eprintln!(
-                            "[Worker {}] Waiting... ({}x) - Pending: {}, Executing: {}, Executed: {}, Committed: {}",
-                            worker_id,
-                            wait_count,
-                            stats.pending,
-                            stats.executing,
-                            stats.executed,
-                            stats.committed
-                        );
-                    }
-                    
                     thread::sleep(Duration::from_micros(10));
                 }
                 Task::Done => {
-                    // All done
-                    eprintln!(
-                        "[Worker {}] Done! Total executions: {}",
-                        worker_id,
-                        local_executions
-                    );
                     break;
                 }
             }

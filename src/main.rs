@@ -31,16 +31,19 @@ struct Args {
     #[arg(short = 'b', long, default_value_t = 625)]
     transactions_per_block: usize,
 
-    /// Conflict factors to test (comma-separated, e.g., "0.0,0.25,0.5,0.75,1.0")
-    #[arg(short = 'c', long, value_delimiter = ',', default_values_t = vec![0.0, 0.25, 0.5, 0.75, 1.0])]
-    conflicts: Vec<f64>,
+    /// Number of "hot" accounts to transfer between (controls parallelism).
+    /// 2 = all txs touch same 2 accounts (no parallelism)
+    /// 10 = txs pick from 10 accounts (limited parallelism)
+    /// num_accounts = full pool (maximum parallelism)
+    #[arg(short = 'H', long, value_delimiter = ',', default_values_t = vec![2, 10, 100, 1000])]
+    hot_accounts: Vec<usize>,
 
     /// Thread counts to test for parallel executors (comma-separated)
     #[arg(long, value_delimiter = ',', default_values_t = vec![1, 2, 4, 8])]
     threads: Vec<usize>,
 
     /// Enable sequential in-memory executor
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = false)]
     sequential: bool,
 
     /// Enable MDBX sequential executor (requires --features mdbx)
@@ -71,7 +74,7 @@ struct Args {
 /// Results from a single benchmark run.
 #[derive(Debug, Clone)]
 struct BenchmarkResult {
-    conflict_name: String,
+    hot_accounts_label: String,
     executor_name: String,
     preserves_order: bool,
     successful: usize,
@@ -84,7 +87,7 @@ impl BenchmarkResult {
     fn print_header() {
         println!(
             "{:<20} | {:<25} | {:<8} | {:<10} | {:<10} | {:<12} | {:<12}",
-            "Conflict", "Executor", "Ordering", "Successful", "Failed", "Time (ms)", "TPS"
+            "Hot Accounts", "Executor", "Ordering", "Successful", "Failed", "Time (ms)", "TPS"
         );
         println!("{}", "-".repeat(120));
     }
@@ -92,7 +95,7 @@ impl BenchmarkResult {
     fn print(&self) {
         println!(
             "{:<20} | {:<25} | {:<8} | {:<10} | {:<10} | {:<12.2} | {:<12.0}",
-            self.conflict_name,
+            self.hot_accounts_label,
             self.executor_name,
             if self.preserves_order { "strict" } else { "loose" },
             self.successful,
@@ -107,7 +110,7 @@ impl BenchmarkResult {
 fn run_in_memory_benchmark<E>(
     executor: &E,
     workload: &Workload,
-    conflict_name: &str,
+    hot_accounts_label: &str,
     num_transactions: usize,
 ) -> BenchmarkResult
 where
@@ -120,7 +123,7 @@ where
     let elapsed = start.elapsed();
 
     BenchmarkResult {
-        conflict_name: conflict_name.to_string(),
+        hot_accounts_label: hot_accounts_label.to_string(),
         executor_name: executor.name().to_string(),
         preserves_order: executor.preserves_order(),
         successful: result.successful,
@@ -190,7 +193,7 @@ fn main() {
     println!("  • Transactions per block: {}", args.transactions_per_block);
     println!("  • Number of blocks: {}", num_blocks);
     println!("  • Signature verification: {}", if verify_signatures { "enabled" } else { "disabled" });
-    println!("  • Conflict factors: {:?}", args.conflicts);
+    println!("  • Hot accounts: {:?}", args.hot_accounts);
     println!("  • Thread counts (parallel): {:?}", args.threads);
     println!();
 
@@ -208,14 +211,14 @@ fn main() {
         print_section_header("Sequential In-Memory Executor (CacheDB)");
         BenchmarkResult::print_header();
 
-        for &conflict_factor in &args.conflicts {
-            let conflict_name = format!("{:.0}% conflicts", conflict_factor * 100.0);
+        for &hot_accounts in &args.hot_accounts {
+            let hot_accounts_label = format!("{} accounts", hot_accounts);
             
             let workload_config = WorkloadConfig {
                 num_accounts: args.num_accounts,
                 num_transactions: args.num_transactions,
                 transactions_per_block: args.transactions_per_block,
-                conflict_factor,
+                hot_accounts,
                 seed: 42,
                 chain_id: 1,
             };
@@ -223,7 +226,7 @@ fn main() {
             let workload = Workload::generate(workload_config);
             let executor = SequentialExecutor::with_verification(verify_signatures);
 
-            let result = run_in_memory_benchmark(&executor, &workload, &conflict_name, args.num_transactions);
+            let result = run_in_memory_benchmark(&executor, &workload, &hot_accounts_label, args.num_transactions);
             result.print();
             all_results.push(result);
         }
@@ -237,14 +240,14 @@ fn main() {
         print_section_header("MDBX Sequential Executor (Persistent storage)");
         BenchmarkResult::print_header();
 
-        for &conflict_factor in &args.conflicts {
-            let conflict_name = format!("{:.0}% conflicts", conflict_factor * 100.0);
+        for &hot_accounts in &args.hot_accounts {
+            let hot_accounts_label = format!("{} accounts", hot_accounts);
             
             let workload_config = WorkloadConfig {
                 num_accounts: args.num_accounts,
                 num_transactions: args.num_transactions,
                 transactions_per_block: args.transactions_per_block,
-                conflict_factor,
+                hot_accounts,
                 seed: 42,
                 chain_id: 1,
             };
@@ -262,7 +265,7 @@ fn main() {
             let elapsed = start.elapsed();
 
             let bench_result = BenchmarkResult {
-                conflict_name,
+                hot_accounts_label,
                 executor_name: executor.name().to_string(),
                 preserves_order: executor.preserves_order(),
                 successful: result.successful,
@@ -284,14 +287,14 @@ fn main() {
         print_section_header("MDBX Batched Executor (Block-level caching and commit)");
         BenchmarkResult::print_header();
 
-        for &conflict_factor in &args.conflicts {
-            let conflict_name = format!("{:.0}% conflicts", conflict_factor * 100.0);
+        for &hot_accounts in &args.hot_accounts {
+            let hot_accounts_label = format!("{} accounts", hot_accounts);
             
             let workload_config = WorkloadConfig {
                 num_accounts: args.num_accounts,
                 num_transactions: args.num_transactions,
                 transactions_per_block: args.transactions_per_block,
-                conflict_factor,
+                hot_accounts,
                 seed: 42,
                 chain_id: 1,
             };
@@ -309,7 +312,7 @@ fn main() {
             let elapsed = start.elapsed();
 
             let bench_result = BenchmarkResult {
-                conflict_name,
+                hot_accounts_label,
                 executor_name: executor.name().to_string(),
                 preserves_order: executor.preserves_order(),
                 successful: result.total_successful,
@@ -334,14 +337,14 @@ fn main() {
             println!("--- {} threads ---", num_threads);
             BenchmarkResult::print_header();
 
-            for &conflict_factor in &args.conflicts {
-                let conflict_name = format!("{:.0}% conflicts", conflict_factor * 100.0);
+            for &hot_accounts in &args.hot_accounts {
+                let hot_accounts_label = format!("{} accounts", hot_accounts);
                 
                 let workload_config = WorkloadConfig {
                     num_accounts: args.num_accounts,
                     num_transactions: args.num_transactions,
                     transactions_per_block: args.transactions_per_block,
-                    conflict_factor,
+                    hot_accounts,
                     seed: 42,
                     chain_id: 1,
                 };
@@ -349,7 +352,7 @@ fn main() {
                 let workload = Workload::generate(workload_config);
                 let executor = BlockStmExecutor::new(num_threads, verify_signatures);
 
-                let result = run_in_memory_benchmark(&executor, &workload, &conflict_name, args.num_transactions);
+                let result = run_in_memory_benchmark(&executor, &workload, &hot_accounts_label, args.num_transactions);
                 result.print();
                 all_results.push(result);
             }
@@ -371,14 +374,14 @@ fn main() {
             println!("--- {} threads ---", num_threads);
             BenchmarkResult::print_header();
 
-            for &conflict_factor in &args.conflicts {
-                let conflict_name = format!("{:.0}% conflicts", conflict_factor * 100.0);
+            for &hot_accounts in &args.hot_accounts {
+                let hot_accounts_label = format!("{} accounts", hot_accounts);
                 
                 let workload_config = WorkloadConfig {
                     num_accounts: args.num_accounts,
                     num_transactions: args.num_transactions,
                     transactions_per_block: args.transactions_per_block,
-                    conflict_factor,
+                    hot_accounts,
                     seed: 42,
                     chain_id: 1,
                 };
@@ -402,7 +405,7 @@ fn main() {
                 });
 
                 let bench_result = BenchmarkResult {
-                    conflict_name,
+                    hot_accounts_label,
                     executor_name: format!("fdb_parallel_{}t", num_threads),
                     preserves_order: false,
                     successful: result.total_successful,

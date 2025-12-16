@@ -163,7 +163,7 @@ mod tests {
         let config = WorkloadConfig {
             num_accounts: 10,
             num_transactions: 5,
-            conflict_factor: 0.0,
+            hot_accounts: 100,
             seed: 42,
             chain_id: 1,
             transactions_per_block: 5,
@@ -184,7 +184,7 @@ mod tests {
         let config = WorkloadConfig {
             num_accounts: 10,
             num_transactions: 5,
-            conflict_factor: 0.0,
+            hot_accounts: 100,
             seed: 42,
             chain_id: 1,
             transactions_per_block: 5,
@@ -205,7 +205,7 @@ mod tests {
         let config = WorkloadConfig {
             num_accounts: 10,
             num_transactions: 5,
-            conflict_factor: 0.0,
+            hot_accounts: 100,
             seed: 42,
             chain_id: 1,
             transactions_per_block: 5,
